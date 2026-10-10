@@ -1,0 +1,8 @@
+[{
+      "relation": ["delegate_permission/common.handle_all_urls"],
+      "target": {
+        "namespace": "android_app",
+        "package_name": "app.vercel.balconeeabsen.twa",
+        "sha256_cert_fingerprints": ["2A:E9:0B:ED:49:63:DC:3D:90:A6:9C:22:F2:86:8B:F7:56:49:6C:18:1E:8B:4D:16:37:F7:7D:61:7F:88:7A:7C"]
+      }
+    }]
