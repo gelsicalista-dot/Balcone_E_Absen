@@ -96,9 +96,11 @@ function doPost(e) {
     } else if (action === 'calculateMonthlyKPI') {
       result = calculateMonthlyKPI(payload[0]);
     } else if (action === 'getAttendanceAndLeaveResume') {
-      result = getAttendanceAndLeaveResume(payload[0], payload[1], payload[2]);
+      result = getAttendanceAndLeaveResume(payload[0], payload[1], payload[2], payload[3]);
+    } else if (action === 'auditDailyUnattendedEmployees') {
+      result = auditDailyUnattendedEmployees();
     } else if (action === 'generateResumeAttendancePDFReport') {
-      result = generateResumeAttendancePDFReport(payload[0], payload[1], payload[2]);
+      result = generateResumeAttendancePDFReport(payload[0], payload[1], payload[2], payload[3]);
     } else if (action === 'getGlobalAttendanceList') {
       result = getGlobalAttendanceList(payload[0], payload[1], payload[2], payload[3], payload[4], payload[5]);
     } else if (action === 'generateAttendancePDFReport') {
@@ -939,9 +941,11 @@ function loginUser(noTelp, password, clientDeviceId) {
         status_kerja: user.status_kerja || 'Aktif',
         tgl_resign: user.tgl_resign || '',
         tgl_lahir: user.tgl_lahir || '-',
+        tgl_masuk: user.tgl_masuk || '',
         foto: user.foto || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150',
         kuota_cuti_tahunan: user.kuota_cuti_tahunan,
         sisa_cuti_tahunan: user.sisa_cuti_tahunan,
+        leave_status: calculateEmployeeLeaveStatus(user, new Date()),
         device_id: user.device_id || clientDeviceId || ''
       }
     };
@@ -1053,14 +1057,6 @@ function processAbsensi(nik, userLat, userLong, qrSecretCode, actionType, offlin
       return { success: false, message: 'QR Code Kantor tidak valid!' };
     }
 
-    const distance = haversineDistance(parseFloat(userLat), parseFloat(userLong), kantorLat, kantorLong);
-    if (distance > maxRadius) {
-      return { 
-        success: false, 
-        message: 'Posisi Anda di luar radius aman area The Balcone! Jarak Anda: ' + distance + 'm (Maks: ' + maxRadius + 'm)' 
-      };
-    }
-
     const todayDate = offlineTimestamp ? new Date(Number(offlineTimestamp)) : new Date();
     const todayStr = Utilities.formatDate(todayDate, 'Asia/Jakarta', 'dd/MM/yyyy');
     const isoTodayStr = Utilities.formatDate(todayDate, 'Asia/Jakarta', 'yyyy-MM-dd');
@@ -1068,17 +1064,55 @@ function processAbsensi(nik, userLat, userLong, qrSecretCode, actionType, offlin
     
     const yesterdayDate = new Date(todayDate.getTime() - 24 * 60 * 60 * 1000);
     const yesterdayStr = Utilities.formatDate(yesterdayDate, 'Asia/Jakarta', 'dd/MM/yyyy');
+    const isoYesterdayStr = Utilities.formatDate(yesterdayDate, 'Asia/Jakarta', 'yyyy-MM-dd');
 
-    const rosterList = getSheetDataAsObjects(CONFIG.SHEET_ROSTER);
-    const userRosterToday = rosterList.find(r => r.nik === nik && (r.tanggal === isoTodayStr || r.tanggal === todayStr));
+    const todayYMD = normalizeDateToYMD(todayDate);
+    const yesterdayYMD = normalizeDateToYMD(yesterdayDate);
+
+    const distance = haversineDistance(parseFloat(userLat), parseFloat(userLong), kantorLat, kantorLong);
+    let isRadiusExceeded = (distance > maxRadius);
+
+    if (isRadiusExceeded) {
+      // Pengecualian Aman untuk Sesi PULANG / Sinkronisasi Offline:
+      // Jika karyawan sudah terbukti memiliki Absen Masuk yang sah hari ini di resort dan berhasil memindai QR fisik resmi kantor:
+      if (actionType === 'PULANG') {
+        const absensiCheck = getSheetDataAsObjects(CONFIG.SHEET_ABSENSI) || [];
+        const hasValidMasuk = absensiCheck.some(a => 
+          a && String(a.nik).trim() === String(nik).trim() && 
+          (normalizeDateToYMD(a.tanggal) === todayYMD || normalizeDateToYMD(a.tanggal) === yesterdayYMD) &&
+          a.jam_masuk && a.jam_masuk !== ''
+        );
+        if (hasValidMasuk) {
+          isRadiusExceeded = false; // Lolos verifikasi sesi pulang!
+        }
+      }
+    }
+
+    if (isRadiusExceeded) {
+      return { 
+        success: false, 
+        message: 'Posisi Anda di luar radius aman area The Balcone! Jarak Anda: ' + distance + 'm (Maks: ' + maxRadius + 'm)' 
+      };
+    }
+
+    const rosterList = getSheetDataAsObjects(CONFIG.SHEET_ROSTER) || [];
+    const userRosterToday = rosterList.find(r => 
+      r && String(r.nik).trim() === String(nik).trim() && 
+      normalizeDateToYMD(r.tanggal) === todayYMD
+    );
 
     let activeShift = null;
-    const shifts = getSheetDataAsObjects(CONFIG.SHEET_SHIFT);
+    const shifts = getSheetDataAsObjects(CONFIG.SHEET_SHIFT) || [];
 
     if (actionType === 'MASUK') {
+      let isOffDay = false;
+      let offLabel = 'OFF (Libur)';
+
       if (userRosterToday) {
-        const shiftVal = userRosterToday.id_shift || userRosterToday.status_hari;
-        if (['OFF', 'CT', 'PH', 'EO', 'S', 'I', 'CK'].includes(shiftVal)) {
+        const rawShift = (userRosterToday.id_shift || userRosterToday.status_hari || '').toString().trim();
+        const shiftVal = rawShift.toUpperCase();
+        if (['OFF', 'CT', 'PH', 'EO', 'S', 'I', 'CK'].includes(shiftVal) || shiftVal.includes('OFF') || shiftVal.includes('LIBUR')) {
+          isOffDay = true;
           const labelMap = {
             'OFF': 'OFF (Libur)',
             'CT': 'Cuti Tahunan (CT)',
@@ -1088,9 +1122,20 @@ function processAbsensi(nik, userLat, userLong, qrSecretCode, actionType, offlin
             'I': 'Izin (I)',
             'CK': 'Cuti Khusus (CK)'
           };
-          return { success: false, message: 'Hari ini jadwal Anda adalah ' + (labelMap[shiftVal] || shiftVal) + ' pada Roster Shift.' };
+          offLabel = labelMap[shiftVal] || rawShift;
+        } else {
+          activeShift = shifts.find(s => s && String(s.id_shift).trim().toUpperCase() === shiftVal);
         }
-        activeShift = shifts.find(s => s.id_shift === userRosterToday.id_shift);
+      } else {
+        // Konsisten dengan Roster & Riwayat: Jika belum ada jadwal roster yang diplot HOD, tolak presensi masuk
+        return { 
+          success: false, 
+          message: 'Hari ini jadwal shift Anda belum dibuat oleh HOD di Roster (Status: OFF). Presensi Masuk ditolak.' 
+        };
+      }
+
+      if (isOffDay) {
+        return { success: false, message: 'Hari ini jadwal Anda adalah ' + offLabel + '. Absen Masuk ditolak.' };
       }
 
       if (!activeShift) {
@@ -1099,14 +1144,34 @@ function processAbsensi(nik, userLat, userLong, qrSecretCode, actionType, offlin
     }
 
     const sheetAbsensi = ss.getSheetByName(CONFIG.SHEET_ABSENSI);
-    const absensiData = getSheetDataAsObjects(CONFIG.SHEET_ABSENSI);
-    const existingIndex = absensiData.findIndex(a => a.nik === nik && a.tanggal === todayStr);
+    const absensiData = getSheetDataAsObjects(CONFIG.SHEET_ABSENSI) || [];
+    const existingIndex = absensiData.findIndex(a => 
+      a && String(a.nik).trim() === String(nik).trim() && 
+      normalizeDateToYMD(a.tanggal) === todayYMD
+    );
 
     const formattedUserLat = "'" + userLat.toString();
     const formattedUserLong = "'" + userLong.toString();
 
     if (actionType === 'MASUK') {
-      if (existingIndex !== -1 && absensiData[existingIndex].jam_masuk !== '') {
+      // Auto-tag sesi kemarin jika lupa absen pulang
+      const pendingYesterdayIdx = absensiData.findIndex(a => 
+        a && String(a.nik).trim() === String(nik).trim() && 
+        normalizeDateToYMD(a.tanggal) === yesterdayYMD && 
+        a.jam_masuk && a.jam_masuk !== '' && (!a.jam_pulang || a.jam_pulang === '' || a.jam_pulang === '-')
+      );
+      if (pendingYesterdayIdx !== -1) {
+        const yRoster = rosterList.find(r => r && String(r.nik).trim() === String(nik).trim() && normalizeDateToYMD(r.tanggal) === yesterdayYMD);
+        const yShift = yRoster ? (yRoster.id_shift || yRoster.status_hari || '') : '';
+        if (!isLegitimateOvernightSession(absensiData[pendingYesterdayIdx], yShift, shifts, todayDate)) {
+          const prevStatus = (absensiData[pendingYesterdayIdx].status || 'Tepat Waktu').toString();
+          if (!prevStatus.includes('Tanpa Pulang') && !prevStatus.includes('Tanpa Absen Pulang')) {
+            sheetAbsensi.getRange(pendingYesterdayIdx + 2, 10).setValue(prevStatus + ' (Tanpa Pulang)');
+          }
+        }
+      }
+
+      if (existingIndex !== -1 && absensiData[existingIndex].jam_masuk && absensiData[existingIndex].jam_masuk !== '') {
         return { success: false, message: 'Anda sudah melakukan Absen Masuk hari ini!' };
       }
 
@@ -1115,19 +1180,19 @@ function processAbsensi(nik, userLat, userLong, qrSecretCode, actionType, offlin
       
       if (activeShift && activeShift.jam_masuk && activeShift.jam_masuk.includes(':')) {
         const [scheduleHour, scheduleMin] = activeShift.jam_masuk.split(':').map(Number);
-        const now = new Date();
+        const now = todayDate;
         const scheduleTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), scheduleHour, scheduleMin, 0);
         const toleranceMs = parseInt(activeShift.toleransi_terlambat_menit || '15', 10) * 60 * 1000;
         
         if (now.getTime() > scheduleTime.getTime() + toleranceMs) {
           lateMinutes = Math.round((now.getTime() - scheduleTime.getTime()) / 60000);
-          status = 'Terlambat';
+          status = 'Terlambat (' + lateMinutes + 'm)';
 
           // Cek dispensasi jika ada izin jam-jaman yang disetujui HOD/HRD untuk hari ini
           const allIzinData = getSheetDataAsObjects(CONFIG.SHEET_IZIN) || [];
           const approvedIzinJam = allIzinData.find(iz => 
-            iz && iz.nik === nik && 
-            (iz.tanggal_mulai === isoTodayStr || iz.tanggal_mulai === todayStr) &&
+            iz && String(iz.nik).trim() === String(nik).trim() && 
+            normalizeDateToYMD(iz.tanggal_mulai) === todayYMD &&
             (iz.status_persetujuan === 'Approved' || iz.status_persetujuan === 'Approved_HOD') &&
             (iz.jenis || '').toString().toLowerCase().includes('jam')
           );
@@ -1158,40 +1223,138 @@ function processAbsensi(nik, userLat, userLong, qrSecretCode, actionType, offlin
       }
 
       SpreadsheetApp.flush();
-      return { success: true, message: 'Absen Masuk Berhasil! Status: ' + status + ' (' + timeStr + ')' };
+      return { 
+        success: true, 
+        message: 'Absen Masuk Berhasil! Status: ' + status + ' (' + timeStr + ')',
+        jam_masuk: timeStr,
+        status: status,
+        lateMinutes: lateMinutes
+      };
 
     } else if (actionType === 'PULANG') {
-      let targetIndex = absensiData.findIndex(a => a.nik === nik && a.tanggal === todayStr && a.jam_masuk !== '' && a.jam_pulang === '');
+      let targetIndex = absensiData.findIndex(a => 
+        a && String(a.nik).trim() === String(nik).trim() && 
+        normalizeDateToYMD(a.tanggal) === todayYMD && 
+        a.jam_masuk !== '' && (!a.jam_pulang || a.jam_pulang === '')
+      );
       let isOvernightSession = false;
 
       if (targetIndex === -1) {
-        targetIndex = absensiData.findIndex(a => a.nik === nik && a.tanggal === yesterdayStr && a.jam_masuk !== '' && a.jam_pulang === '');
-        if (targetIndex !== -1) {
-          isOvernightSession = true;
+        const yesterdayIdx = absensiData.findIndex(a => 
+          a && String(a.nik).trim() === String(nik).trim() && 
+          normalizeDateToYMD(a.tanggal) === yesterdayYMD && 
+          a.jam_masuk !== '' && (!a.jam_pulang || a.jam_pulang === '' || a.jam_pulang === '-')
+        );
+        if (yesterdayIdx !== -1) {
+          const yRoster = rosterList.find(r => r && String(r.nik).trim() === String(nik).trim() && normalizeDateToYMD(r.tanggal) === yesterdayYMD);
+          const yShift = yRoster ? (yRoster.id_shift || yRoster.status_hari || '') : '';
+          if (isLegitimateOvernightSession(absensiData[yesterdayIdx], yShift, shifts, todayDate)) {
+            targetIndex = yesterdayIdx;
+            isOvernightSession = true;
+          }
         }
       }
 
       if (targetIndex === -1) {
-        const alreadyOutToday = absensiData.some(a => a.nik === nik && a.tanggal === todayStr && a.jam_pulang !== '');
+        const alreadyOutToday = absensiData.some(a => 
+          a && String(a.nik).trim() === String(nik).trim() && 
+          normalizeDateToYMD(a.tanggal) === todayYMD && 
+          a.jam_pulang && a.jam_pulang !== ''
+        );
         if (alreadyOutToday) {
           return { success: false, message: 'Anda sudah melakukan Absen Pulang hari ini!' };
         }
         return { success: false, message: 'Anda belum Absen Masuk untuk sesi shift ini!' };
       }
 
+      const sessionDateStr = absensiData[targetIndex].tanggal;
+      const sessionTargetYMD = isOvernightSession ? yesterdayYMD : todayYMD;
+
+      // Evaluasi jadwal pulang shift untuk deteksi Pulang Cepat
+      const sessionRoster = rosterList.find(r => 
+        r && String(r.nik).trim() === String(nik).trim() && 
+        normalizeDateToYMD(r.tanggal) === sessionTargetYMD
+      );
+      let sessionShift = null;
+      if (sessionRoster) {
+        const rShiftVal = (sessionRoster.id_shift || sessionRoster.status_hari || '').toString().trim().toUpperCase();
+        sessionShift = shifts.find(s => s && String(s.id_shift).trim().toUpperCase() === rShiftVal);
+      }
+      if (!sessionShift) {
+        sessionShift = shifts[0];
+      }
+
+      let earlyLeaveMinutes = 0;
+      let existingStatus = (absensiData[targetIndex].status || 'Tepat Waktu').toString().trim();
+      let existingLateMinutes = parseInt(absensiData[targetIndex].keterlambatan_menit || '0', 10);
+      if (isNaN(existingLateMinutes)) existingLateMinutes = 0;
+      let updatedStatus = existingStatus;
+
+      if (sessionShift && sessionShift.jam_pulang && sessionShift.jam_pulang.includes(':')) {
+        const [outHour, outMin] = sessionShift.jam_pulang.split(':').map(Number);
+        const refDate = todayDate;
+        const schedOutDate = new Date(refDate.getFullYear(), refDate.getMonth(), refDate.getDate(), outHour, outMin, 0);
+
+        // Jika jam tap pulang lebih awal dari jadwal resmi (toleransi > 5 menit)
+        if (refDate.getTime() < schedOutDate.getTime() - 5 * 60 * 1000) {
+          earlyLeaveMinutes = Math.round((schedOutDate.getTime() - refDate.getTime()) / 60000);
+
+          // Cek apakah ada izin jam-jaman yang disetujui HOD/HRD untuk sesi ini
+          const allIzinData = getSheetDataAsObjects(CONFIG.SHEET_IZIN) || [];
+          const approvedIzinJam = allIzinData.find(iz => 
+            iz && String(iz.nik).trim() === String(nik).trim() && 
+            normalizeDateToYMD(iz.tanggal_mulai) === sessionTargetYMD &&
+            (iz.status_persetujuan === 'Approved' || iz.status_persetujuan === 'Approved_HOD') &&
+            (iz.jenis || '').toString().toLowerCase().includes('jam')
+          );
+
+          if (approvedIzinJam) {
+            earlyLeaveMinutes = 0;
+            if (existingStatus.includes('Terlambat')) {
+              updatedStatus = 'Terlambat & Dispensasi Izin Pulang Cepat';
+            } else {
+              updatedStatus = 'Dispensasi Izin Pulang Cepat';
+            }
+          } else {
+            if (existingStatus.includes('Terlambat')) {
+              const baseLateLabel = existingLateMinutes > 0 ? ('Terlambat (' + existingLateMinutes + 'm)') : 'Terlambat';
+              updatedStatus = baseLateLabel + ' & Pulang Cepat (' + earlyLeaveMinutes + 'm)';
+            } else {
+              updatedStatus = 'Pulang Cepat (' + earlyLeaveMinutes + 'm)';
+            }
+          }
+        }
+      }
+
+      const totalDeficitMinutes = existingLateMinutes + earlyLeaveMinutes;
+
       const rowNum = targetIndex + 2;
       sheetAbsensi.getRange(rowNum, 7).setValue(timeStr);
       sheetAbsensi.getRange(rowNum, 8).setNumberFormat('@').setValue(formattedUserLat);
       sheetAbsensi.getRange(rowNum, 9).setNumberFormat('@').setValue(formattedUserLong);
+      sheetAbsensi.getRange(rowNum, 10).setValue(updatedStatus);
+      sheetAbsensi.getRange(rowNum, 11).setValue(totalDeficitMinutes.toString());
 
       SpreadsheetApp.flush();
 
-      const sessionDate = absensiData[targetIndex].tanggal;
-      const successMsg = isOvernightSession
-        ? 'Absen Pulang Berhasil! Sesi Shift Malam (' + sessionDate + ') telah diselesaikan (' + timeStr + '). Terima kasih!'
-        : 'Absen Pulang Berhasil! Terima kasih (' + timeStr + ')';
+      let successMsg = isOvernightSession
+        ? 'Absen Pulang Berhasil! Sesi Shift Malam (' + sessionDateStr + ') diselesaikan (' + timeStr + ').'
+        : 'Absen Pulang Berhasil! Waktu: ' + timeStr;
 
-      return { success: true, message: successMsg };
+      if (earlyLeaveMinutes > 0) {
+        successMsg += ' (Catatan: Pulang Cepat ' + earlyLeaveMinutes + ' menit)';
+      } else {
+        successMsg += '. Terima kasih!';
+      }
+
+      return { 
+        success: true, 
+        message: successMsg,
+        jam_pulang: timeStr,
+        status: updatedStatus,
+        earlyLeaveMinutes: earlyLeaveMinutes,
+        totalDeficitMinutes: totalDeficitMinutes
+      };
     }
 
   } catch (err) {
@@ -1229,6 +1392,360 @@ function syncOfflineAttendance(items) {
   }
 }
 
+/**
+ * Helper: Deteksi apakah sebuah shift/schedule merupakan penugasan tanpa jam operasional kantor/resort
+ * Contoh: Bogor, Bukittinggi, BKT, BGR, SC, Sales Call, Dinas Luar, Remote, Tugas Luar, dll.
+ * Penugasan jenis ini tidak mewajibkan absen fisik di resort dan TIDAK BOLEH dikenai ALPA.
+ */
+function isNoHoursSchedule(val, shiftsList) {
+  if (!val) return false;
+  const sStr = val.toString().trim().toLowerCase();
+  if (
+    sStr === 'sc' ||
+    sStr === 'bkt' ||
+    sStr === 'bgr' ||
+    sStr.includes('sales call') ||
+    sStr.includes('bogor') || 
+    sStr.includes('bukittinggi') || 
+    sStr.includes('tanpa jam') || 
+    sStr.includes('non jam') ||
+    sStr.includes('dinas') || 
+    sStr.includes('luar kota') || 
+    sStr.includes('remote') || 
+    sStr.includes('tugas luar')
+  ) {
+    return true;
+  }
+  if (Array.isArray(shiftsList)) {
+    const matched = shiftsList.find(s => s && (
+      (s.id_shift && s.id_shift.toString().trim().toLowerCase() === sStr) ||
+      (s.nama_shift && s.nama_shift.toString().trim().toLowerCase() === sStr)
+    ));
+    if (matched) {
+      const namaLower = (matched.nama_shift || '').toString().toLowerCase();
+      if (
+        namaLower === 'sc' ||
+        namaLower === 'bkt' ||
+        namaLower === 'bgr' ||
+        namaLower.includes('sales call') ||
+        namaLower.includes('bogor') || 
+        namaLower.includes('bukittinggi') || 
+        namaLower.includes('dinas') || 
+        namaLower.includes('tanpa jam') || 
+        namaLower.includes('remote')
+      ) {
+        return true;
+      }
+      const masuk = (matched.jam_masuk || '').toString().trim();
+      const pulang = (matched.jam_pulang || '').toString().trim();
+      const emptyMasuk = !masuk || masuk === '-' || masuk === '' || masuk === '00:00';
+      const emptyPulang = !pulang || pulang === '-' || pulang === '' || pulang === '00:00';
+      if (emptyMasuk && emptyPulang) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Helper: Deteksi apakah jadwal memiliki jam kerja operasional wajib hadir di resort
+ * Mengembalikan false jika libur (OFF), cuti/izin resmi, atau penugasan tanpa jam kerja (SC, BKT, dll)
+ */
+function hasOperationalHours(shiftVal, shiftsList) {
+  if (!shiftVal) return false;
+  const sUpper = shiftVal.toString().trim().toUpperCase();
+  if (['OFF', 'CT', 'PH', 'EO', 'S', 'I', 'CK'].includes(sUpper) || sUpper.includes('OFF') || sUpper.includes('LIBUR')) {
+    return false;
+  }
+  if (isNoHoursSchedule(shiftVal, shiftsList)) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Helper: Ambil string format YYYY-MM periode cut-off berjalan aktif (26 s.d. 25)
+ */
+function getActiveCutoffMonthStr() {
+  const now = new Date();
+  let y = now.getFullYear();
+  let m = now.getMonth() + 1;
+  if (now.getDate() >= 26) {
+    m += 1;
+    if (m > 12) {
+      m = 1;
+      y += 1;
+    }
+  }
+  return y + '-' + String(m).padStart(2, '0');
+}
+
+/**
+ * Helper: Memeriksa apakah sesi absensi kemarin benar-benar shift malam yang sah (Overnight Shift 3)
+ * dan masih dalam jendela waktu checkout wajar (maksimal jam 12:00 siang hari berikutnya).
+ * Mencegah staf shift pagi/siang yang lupa absen pulang dianggap "masih bertugas shift malam" keesokan harinya.
+ */
+function isLegitimateOvernightSession(yesterdayRecord, yesterdayRosterShiftVal, shiftsList, checkTime) {
+  if (!yesterdayRecord || !yesterdayRecord.jam_masuk || (yesterdayRecord.jam_pulang && yesterdayRecord.jam_pulang !== '' && yesterdayRecord.jam_pulang !== '-')) {
+    return false;
+  }
+  const now = checkTime || new Date();
+  // Jika sudah lewat jam 12:00 siang hari berikutnya, sesi kemarin dianggap expired / tidak absen pulang
+  if (now.getHours() >= 12) {
+    return false;
+  }
+
+  // Cek apakah jadwal roster kemarin atau shift record-nya memang shift malam
+  const sStr = (yesterdayRosterShiftVal || '').toString().trim().toLowerCase();
+  if (sStr.includes('malam') || sStr.includes('night') || sStr === 'sft-03' || sStr === 's3') {
+    return true;
+  }
+
+  // Cek di daftar master shift
+  if (Array.isArray(shiftsList)) {
+    const matched = shiftsList.find(s => s && (
+      (s.id_shift && s.id_shift.toString().trim().toLowerCase() === sStr) ||
+      (s.nama_shift && s.nama_shift.toString().trim().toLowerCase() === sStr)
+    ));
+    if (matched) {
+      const nama = (matched.nama_shift || '').toLowerCase();
+      if (nama.includes('malam') || nama.includes('night')) return true;
+      if (matched.jam_masuk && matched.jam_pulang) {
+        const [inH] = matched.jam_masuk.split(':').map(Number);
+        const [outH] = matched.jam_pulang.split(':').map(Number);
+        if (outH < inH) return true;
+      }
+    }
+  }
+
+  // Jika jam masuk kemarin terjadi di atas jam 20:00 malam, bisa diklasifikasikan shift malam
+  if (yesterdayRecord.jam_masuk.includes(':')) {
+    const [inH] = yesterdayRecord.jam_masuk.split(':').map(Number);
+    if (inH >= 20 || inH < 4) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Master Generator: Timeline Absensi Harian Lengkap Berkelanjutan (Anti-Loncat Tanggal)
+ * Menyatukan kehadiran fisik, catatan lupa pulang, status OFF, Cuti/PH/EO/S/I/CK,
+ * Penugasan Non-Jam (SC, BKT, dll), serta status ALPA untuk seluruh hari dalam rentang periode.
+ */
+function buildContinuousAttendanceTimeline(employeesList, startDate, endDate, absensiList, rosterList, izinList, shiftsList) {
+  const result = [];
+  if (!Array.isArray(employeesList) || employeesList.length === 0) return result;
+
+  const today = new Date();
+  const todayYMD = normalizeDateToYMD(today);
+
+  // Normalisasi rentang tanggal
+  if (!startDate || !endDate) {
+    const activeCut = getCutoffRange(getActiveCutoffMonthStr());
+    if (!startDate) startDate = Utilities.formatDate(activeCut.startDate, 'Asia/Jakarta', 'yyyy-MM-dd');
+    if (!endDate) endDate = Utilities.formatDate(activeCut.endDate, 'Asia/Jakarta', 'yyyy-MM-dd');
+  }
+
+  let startYMD = normalizeDateToYMD(startDate);
+  let endYMD = normalizeDateToYMD(endDate);
+  if (startYMD && endYMD && startYMD > endYMD) {
+    const t = startYMD; startYMD = endYMD; endYMD = t;
+  }
+
+  // Siapkan daftar cuti yang sudah di-approve
+  const approvedLeaves = (izinList || []).filter(iz => {
+    if (!iz) return false;
+    const st = (iz.status_persetujuan || '').toString();
+    return st === 'Approved' || st === 'Approved_HOD';
+  });
+
+  // Tentukan batas tanggal akhir evaluasi harian: tidak melebihi hari ini
+  const maxEvalYMD = endYMD < todayYMD ? endYMD : todayYMD;
+
+  employeesList.forEach(emp => {
+    if (!emp || !emp.nik) return;
+    const nik = String(emp.nik).trim();
+    const nama = emp.nama || 'N/A';
+    const dept = emp.departemen || '-';
+
+    // Parse start date
+    const sStr = String(startYMD || '');
+    const mStr = String(maxEvalYMD || '');
+    if (sStr.length < 8 || mStr.length < 8) return;
+    let curYear = parseInt(sStr.substring(0, 4), 10);
+    let curMonth = parseInt(sStr.substring(4, 6), 10) - 1;
+    let curDay = parseInt(sStr.substring(6, 8), 10);
+    let curDate = new Date(curYear, curMonth, curDay, 12, 0, 0);
+
+    const endYear = parseInt(mStr.substring(0, 4), 10);
+    const endMonth = parseInt(mStr.substring(4, 6), 10) - 1;
+    const endDay = parseInt(mStr.substring(6, 8), 10);
+    const stopDate = new Date(endYear, endMonth, endDay, 12, 0, 0);
+
+    while (curDate <= stopDate) {
+      const curYMD = normalizeDateToYMD(curDate);
+      const curDateStr = Utilities.formatDate(curDate, 'Asia/Jakarta', 'dd/MM/yyyy');
+
+      // 1. Cek apakah ada record absensi fisik di Tabel_Absensi
+      const attRecord = (absensiList || []).find(a => 
+        a && String(a.nik).trim() === nik && normalizeDateToYMD(a.tanggal) === curYMD
+      );
+
+      if (attRecord && attRecord.jam_masuk && attRecord.jam_masuk !== '') {
+        let finalStatus = (attRecord.status || 'Tepat Waktu').toString();
+        const hasPulang = attRecord.jam_pulang && attRecord.jam_pulang !== '' && attRecord.jam_pulang !== '-';
+
+        // Jika hari kemarin/lalu tapi jam pulang kosong -> tandai Tanpa Pulang
+        if (!hasPulang && curYMD < todayYMD) {
+          if (!finalStatus.includes('Tanpa Pulang') && !finalStatus.includes('Tanpa Absen Pulang')) {
+            finalStatus = finalStatus + ' (Tanpa Pulang)';
+          }
+        }
+
+        result.push({
+          id_absen: attRecord.id_absen || ('ATT-' + curYMD),
+          nik: nik,
+          nama_karyawan: nama,
+          departemen: dept,
+          tanggal: curDateStr,
+          _ymd: curYMD,
+          jam_masuk: attRecord.jam_masuk,
+          jam_pulang: attRecord.jam_pulang || '-',
+          status: finalStatus,
+          keterlambatan_menit: attRecord.keterlambatan_menit || '0'
+        });
+
+      } else {
+        // 2. Tidak ada absensi fisik -> Cross-check Cuti, Roster, Non-Jam, ALPA
+        // A. Cek Izin / Cuti Resmi
+        const matchedLeave = approvedLeaves.find(iz => {
+          if (String(iz.nik).trim() !== nik) return false;
+          const sYMD = normalizeDateToYMD(iz.tanggal_mulai);
+          const eYMD = normalizeDateToYMD(iz.tanggal_selesai || iz.tanggal_mulai);
+          return sYMD && sYMD <= curYMD && (eYMD ? eYMD >= curYMD : sYMD >= curYMD);
+        });
+
+        if (matchedLeave) {
+          const jLower = (matchedLeave.jenis || '').toString().toLowerCase();
+          let leaveLabel = matchedLeave.jenis || 'Izin Resmi';
+          if (jLower.includes('tahunan') || jLower === 'ct') leaveLabel = 'Cuti Tahunan (CT)';
+          else if (jLower.includes('publik') || jLower.includes('public') || jLower === 'ph') leaveLabel = 'Public Holiday (PH)';
+          else if (jLower.includes('extra') || jLower === 'eo') leaveLabel = 'Extra Off (EO)';
+          else if (jLower.includes('sakit') || jLower === 's') leaveLabel = 'Sakit (S)';
+          else if (jLower.includes('khusus') || jLower === 'ck') leaveLabel = 'Cuti Khusus (CK)';
+          else if (jLower.includes('jam')) leaveLabel = 'Izin Jam-Jaman';
+          else leaveLabel = 'Izin (I)';
+
+          result.push({
+            id_absen: 'IZIN-' + curYMD,
+            nik: nik,
+            nama_karyawan: nama,
+            departemen: dept,
+            tanggal: curDateStr,
+            _ymd: curYMD,
+            jam_masuk: '-',
+            jam_pulang: '-',
+            status: leaveLabel,
+            keterlambatan_menit: '0'
+          });
+
+        } else {
+          // B. Cek Jadwal Roster
+          const rDay = (rosterList || []).find(r => 
+            r && String(r.nik).trim() === nik && normalizeDateToYMD(r.tanggal) === curYMD
+          );
+          const rawShift = rDay ? (rDay.id_shift || rDay.status_hari || '').toString().trim() : '';
+          const shiftUpper = rawShift.toUpperCase();
+
+          if (!rDay || shiftUpper === 'OFF' || shiftUpper.includes('OFF') || shiftUpper.includes('LIBUR')) {
+            // Default jika tidak ada jadwal roster atau terjadwal libur
+            result.push({
+              id_absen: 'OFF-' + curYMD,
+              nik: nik,
+              nama_karyawan: nama,
+              departemen: dept,
+              tanggal: curDateStr,
+              _ymd: curYMD,
+              jam_masuk: '-',
+              jam_pulang: '-',
+              status: 'OFF (Libur)',
+              keterlambatan_menit: '0'
+            });
+
+          } else if (['CT', 'PH', 'EO', 'S', 'I', 'CK'].includes(shiftUpper)) {
+            const rosterLeaveMap = {
+              'CT': 'Cuti Tahunan (CT)',
+              'PH': 'Public Holiday (PH)',
+              'EO': 'Extra Off (EO)',
+              'S': 'Sakit (S)',
+              'I': 'Izin (I)',
+              'CK': 'Cuti Khusus (CK)'
+            };
+            result.push({
+              id_absen: 'ROSTER-LEAVE-' + curYMD,
+              nik: nik,
+              nama_karyawan: nama,
+              departemen: dept,
+              tanggal: curDateStr,
+              _ymd: curYMD,
+              jam_masuk: '-',
+              jam_pulang: '-',
+              status: rosterLeaveMap[shiftUpper] || shiftUpper,
+              keterlambatan_menit: '0'
+            });
+
+          } else if (isNoHoursSchedule(rawShift, shiftsList)) {
+            let nonJamLabel = rawShift;
+            if (shiftUpper === 'SC' || rawShift.toLowerCase().includes('sales call')) nonJamLabel = 'Sales Call (SC)';
+            else if (shiftUpper === 'BKT' || rawShift.toLowerCase().includes('bukittinggi')) nonJamLabel = 'Bukittinggi (BKT)';
+            else if (shiftUpper === 'BGR' || rawShift.toLowerCase().includes('bogor')) nonJamLabel = 'Bogor (BGR)';
+            else if (rawShift.toLowerCase().includes('dinas')) nonJamLabel = 'Dinas Luar';
+            else if (rawShift.toLowerCase().includes('remote')) nonJamLabel = 'Remote Work';
+
+            result.push({
+              id_absen: 'NONJAM-' + curYMD,
+              nik: nik,
+              nama_karyawan: nama,
+              departemen: dept,
+              tanggal: curDateStr,
+              _ymd: curYMD,
+              jam_masuk: '-',
+              jam_pulang: '-',
+              status: nonJamLabel,
+              keterlambatan_menit: '0'
+            });
+
+          } else {
+            // C. Shift berjam operasional tapi tidak/belum hadir
+            const isToday = (curYMD === todayYMD);
+            result.push({
+              id_absen: (isToday ? 'TODAY-' : 'ALPA-') + curYMD,
+              nik: nik,
+              nama_karyawan: nama,
+              departemen: dept,
+              tanggal: curDateStr,
+              _ymd: curYMD,
+              jam_masuk: '-',
+              jam_pulang: '-',
+              status: isToday ? 'Belum Hadir' : 'ALPA (Tidak Hadir)',
+              keterlambatan_menit: '0'
+            });
+          }
+        }
+      }
+
+      curDate.setDate(curDate.getDate() + 1);
+    }
+  });
+
+  // Urutkan seluruh timeline menurun berdasarkan _ymd (terbaru di atas)
+  result.sort((a, b) => (Number(b._ymd) || 0) - (Number(a._ymd) || 0));
+  return result;
+}
+
 function getKaryawanDashboard(nik, monthYear) {
   try {
     const todayDate = new Date();
@@ -1238,32 +1755,42 @@ function getKaryawanDashboard(nik, monthYear) {
     const yesterdayDate = new Date(todayDate.getTime() - 24 * 60 * 60 * 1000);
     const yesterdayStr = Utilities.formatDate(yesterdayDate, 'Asia/Jakarta', 'dd/MM/yyyy');
 
+    const todayYMD = normalizeDateToYMD(todayDate);
+    const yesterdayYMD = normalizeDateToYMD(yesterdayDate);
+
     const absensi = getSheetDataAsObjects(CONFIG.SHEET_ABSENSI) || [];
-    let todayRecord = absensi.find(a => a.nik === nik && a.tanggal === todayStr) || null;
+    const rosterList = getSheetDataAsObjects(CONFIG.SHEET_ROSTER) || [];
+    const shifts = getSheetDataAsObjects(CONFIG.SHEET_SHIFT) || [];
+    const employees = getSheetDataAsObjects(CONFIG.SHEET_KARYAWAN) || [];
+
+    let todayRecord = absensi.find(a => 
+      a && String(a.nik).trim() === String(nik).trim() && 
+      normalizeDateToYMD(a.tanggal) === todayYMD
+    ) || null;
     
     if (!todayRecord) {
-      const pendingYesterday = absensi.find(a => a.nik === nik && a.tanggal === yesterdayStr && a.jam_masuk !== '' && a.jam_pulang === '');
+      const pendingYesterday = absensi.find(a => 
+        a && String(a.nik).trim() === String(nik).trim() && 
+        normalizeDateToYMD(a.tanggal) === yesterdayYMD && 
+        a.jam_masuk && a.jam_masuk !== '' && (!a.jam_pulang || a.jam_pulang === '' || a.jam_pulang === '-')
+      );
       if (pendingYesterday) {
-        todayRecord = Object.assign({}, pendingYesterday);
-        todayRecord.isOvernightActive = true;
+        const yRoster = rosterList.find(r => r && String(r.nik).trim() === String(nik).trim() && normalizeDateToYMD(r.tanggal) === yesterdayYMD);
+        const yShift = yRoster ? (yRoster.id_shift || yRoster.status_hari || '') : '';
+        if (isLegitimateOvernightSession(pendingYesterday, yShift, shifts, todayDate)) {
+          todayRecord = Object.assign({}, pendingYesterday);
+          todayRecord.isOvernightActive = true;
+        }
       }
     }
     
-    const personalHistory = absensi
-      .filter(a => a.nik === nik)
-      .reverse()
-      .slice(0, 10);
-
     const announcements = (getSheetDataAsObjects(CONFIG.SHEET_PENGUMUMAN) || [])
       .filter(p => p.status_aktif && p.status_aktif.toString().trim().toLowerCase() === 'aktif')
       .reverse();
 
     const leaveHistory = (getSheetDataAsObjects(CONFIG.SHEET_IZIN) || [])
-      .filter(i => i.nik === nik)
+      .filter(i => i && String(i.nik).trim() === String(nik).trim())
       .reverse();
-
-    const rosterList = getSheetDataAsObjects(CONFIG.SHEET_ROSTER) || [];
-    const shifts = getSheetDataAsObjects(CONFIG.SHEET_SHIFT) || [];
 
     let currentMonthStr = monthYear;
     if (!currentMonthStr) {
@@ -1288,13 +1815,18 @@ function getKaryawanDashboard(nik, monthYear) {
 
     while (curDate <= endDate) {
       const isoDate = Utilities.formatDate(curDate, 'Asia/Jakarta', 'yyyy-MM-dd');
-      const matched = rosterList.find(r => r && String(r.nik).trim() === String(nik).trim() && r.tanggal === isoDate);
+      const curYMD = normalizeDateToYMD(curDate);
+      const matched = rosterList.find(r => 
+        r && String(r.nik).trim() === String(nik).trim() && 
+        normalizeDateToYMD(r.tanggal) === curYMD
+      );
       
-      const shiftVal = matched ? (matched.id_shift || matched.status_hari) : 'OFF';
-      let shiftName = shiftVal;
+      const rawShiftVal = matched ? (matched.id_shift || matched.status_hari) : 'OFF';
+      const shiftUpper = (rawShiftVal || '').toString().trim().toUpperCase();
+      let shiftName = rawShiftVal;
       let shiftTime = '';
 
-      if (['OFF', 'CT', 'PH', 'EO', 'S', 'I', 'CK'].includes(shiftVal)) {
+      if (['OFF', 'CT', 'PH', 'EO', 'S', 'I', 'CK'].includes(shiftUpper) || shiftUpper.includes('OFF') || shiftUpper.includes('LIBUR')) {
         const labelMap = {
           'OFF': 'OFF (Libur)',
           'CT': 'Cuti Tahunan (CT)',
@@ -1304,11 +1836,11 @@ function getKaryawanDashboard(nik, monthYear) {
           'I': 'Izin (I)',
           'CK': 'Cuti Khusus (CK)'
         };
-        shiftName = labelMap[shiftVal] || shiftVal;
+        shiftName = labelMap[shiftUpper] || rawShiftVal;
       } else {
-        const matchedShift = shifts.find(s => s.id_shift === shiftVal);
+        const matchedShift = shifts.find(s => s && String(s.id_shift).trim().toUpperCase() === shiftUpper);
         if (matchedShift) {
-          shiftName = matchedShift.nama_shift || shiftVal;
+          shiftName = matchedShift.nama_shift || rawShiftVal;
           if (matchedShift.jam_masuk && matchedShift.jam_pulang) {
             shiftTime = matchedShift.jam_masuk + ' - ' + matchedShift.jam_pulang;
           } else if (matchedShift.jam_masuk) {
@@ -1322,8 +1854,8 @@ function getKaryawanDashboard(nik, monthYear) {
       personalRosterWithDetails.push({
         id_roster: matched ? matched.id_roster : ('OFF-' + isoDate),
         tanggal: isoDate,
-        id_shift: shiftVal,
-        status_hari: matched ? (matched.status_hari || shiftVal) : 'OFF',
+        id_shift: rawShiftVal,
+        status_hari: matched ? (matched.status_hari || rawShiftVal) : 'OFF',
         shift_nama: shiftName,
         shift_jam: shiftTime
       });
@@ -1331,12 +1863,18 @@ function getKaryawanDashboard(nik, monthYear) {
       curDate.setDate(curDate.getDate() + 1);
     }
 
-    const userRoster = rosterList.find(r => r && String(r.nik).trim() === String(nik).trim() && (r.tanggal === isoTodayStr || r.tanggal === todayStr));
+    const userRoster = rosterList.find(r => 
+      r && String(r.nik).trim() === String(nik).trim() && 
+      normalizeDateToYMD(r.tanggal) === todayYMD
+    );
     
+    let isOffToday = false;
     let shiftInfo = 'OFF (Libur)';
     if (userRoster) {
-      const shiftVal = userRoster.id_shift || userRoster.status_hari;
-      if (['OFF', 'CT', 'PH', 'EO', 'S', 'I', 'CK'].includes(shiftVal)) {
+      const rawShift = (userRoster.id_shift || userRoster.status_hari || '').toString().trim();
+      const shiftVal = rawShift.toUpperCase();
+      if (['OFF', 'CT', 'PH', 'EO', 'S', 'I', 'CK'].includes(shiftVal) || shiftVal.includes('OFF') || shiftVal.includes('LIBUR')) {
+        isOffToday = true;
         const labelMap = {
           'OFF': 'OFF (Libur)',
           'CT': 'Cuti Tahunan (CT)',
@@ -1346,34 +1884,259 @@ function getKaryawanDashboard(nik, monthYear) {
           'I': 'Izin (I)',
           'CK': 'Cuti Khusus (CK)'
         };
-        shiftInfo = labelMap[shiftVal] || shiftVal;
+        shiftInfo = labelMap[shiftVal] || rawShift;
       } else {
-        const matched = shifts.find(s => s.id_shift === userRoster.id_shift);
+        const matched = shifts.find(s => s && String(s.id_shift).trim().toUpperCase() === shiftVal);
         if (matched) {
           const jamStr = (matched.jam_masuk && matched.jam_pulang) ? ' (' + matched.jam_masuk + ' - ' + matched.jam_pulang + ')' : (matched.jam_masuk ? ' (' + matched.jam_masuk + ')' : '');
-          shiftInfo = (matched.nama_shift || userRoster.id_shift) + jamStr;
+          shiftInfo = (matched.nama_shift || rawShift) + jamStr;
         } else {
-          shiftInfo = userRoster.id_shift;
+          shiftInfo = rawShift;
         }
       }
+    } else {
+      // 100% Konsisten dengan Tab Roster & Tab Riwayat Kehadiran:
+      // Jika belum diplot oleh HOD di Tabel_Roster, status default hari ini adalah OFF (Libur)
+      isOffToday = true;
+      shiftInfo = 'OFF (Libur)';
+    }
+
+    // Deteksi ALPA masa lalu dalam periode cut-off berjalan
+    const alpaDates = [];
+    const approvedLeaves = leaveHistory.filter(iz => iz && (iz.status_persetujuan === 'Approved' || iz.status_persetujuan === 'Approved_HOD'));
+    let checkDate = new Date(cutOff.startDate);
+    while (checkDate < todayDate) {
+      const checkYMD = normalizeDateToYMD(checkDate);
+      if (checkYMD < todayYMD) {
+        const rDay = rosterList.find(r => r && String(r.nik).trim() === String(nik).trim() && normalizeDateToYMD(r.tanggal) === checkYMD);
+        if (rDay) {
+          const rShift = (rDay.id_shift || rDay.status_hari || '').toString().trim();
+          if (hasOperationalHours(rShift, shifts)) {
+            const hasAtt = absensi.some(a => a && String(a.nik).trim() === String(nik).trim() && normalizeDateToYMD(a.tanggal) === checkYMD && a.jam_masuk && a.jam_masuk !== '');
+            if (!hasAtt) {
+              const hasLeave = approvedLeaves.some(iz => {
+                const sYMD = normalizeDateToYMD(iz.tanggal_mulai);
+                const eYMD = normalizeDateToYMD(iz.tanggal_selesai || iz.tanggal_mulai);
+                return sYMD && sYMD <= checkYMD && (eYMD ? eYMD >= checkYMD : sYMD >= checkYMD);
+              });
+              if (!hasLeave) {
+                alpaDates.push(Utilities.formatDate(checkDate, 'Asia/Jakarta', 'dd/MM/yyyy'));
+              }
+            }
+          }
+        }
+      }
+      checkDate.setDate(checkDate.getDate() + 1);
+    }
+
+    const empObj = employees.find(e => e && String(e.nik).trim() === String(nik).trim());
+    const personalTimeline = buildContinuousAttendanceTimeline(
+      empObj ? [empObj] : [{ nik: nik, nama: '', departemen: '' }],
+      cutOff.startIsoStr,
+      cutOff.endIsoStr,
+      absensi,
+      rosterList,
+      leaveHistory,
+      shifts
+    );
+
+    const leaveStatus = calculateEmployeeLeaveStatus(empObj, todayDate, leaveHistory);
+    if (empObj) {
+      syncEmployeeLeaveBalanceInSheet(nik, leaveStatus.remainingDays);
     }
 
     return {
       success: true,
       todayRecord: todayRecord,
-      history: personalHistory,
+      history: personalTimeline,
       announcements: announcements,
       todayShiftInfo: shiftInfo,
+      isOffToday: isOffToday,
       leaveHistory: leaveHistory,
+      leaveStatus: leaveStatus,
       personalRoster: personalRosterWithDetails,
       holidays: holidaysMap,
       cutoffInfo: {
         startIso: cutOff.startIsoStr,
         endIso: cutOff.endIsoStr
       },
+      alpaDates: alpaDates,
+      hasAlpaWarning: alpaDates.length > 0,
       todayBirthdays: getTodayBirthdaysList()
     };
   } catch (err) {
+    return { success: false, message: err.toString() };
+  }
+}
+
+/**
+ * Monitoring Karyawan Belum Hadir / Terlambat / Potensi Alpa Hari Ini
+ * Membandingkan jadwal roster kerja aktif vs presensi masuk vs izin resmi
+ */
+function getUnattendedEmployeesToday(targetDept) {
+  try {
+    const todayDate = new Date();
+    const todayStr = Utilities.formatDate(todayDate, 'Asia/Jakarta', 'dd/MM/yyyy');
+    const isoTodayStr = Utilities.formatDate(todayDate, 'Asia/Jakarta', 'yyyy-MM-dd');
+    const yesterdayDate = new Date(todayDate.getTime() - 24 * 60 * 60 * 1000);
+    const yesterdayStr = Utilities.formatDate(yesterdayDate, 'Asia/Jakarta', 'dd/MM/yyyy');
+
+    const todayYMD = normalizeDateToYMD(todayDate);
+    const yesterdayYMD = normalizeDateToYMD(yesterdayDate);
+
+    const employees = getSheetDataAsObjects(CONFIG.SHEET_KARYAWAN) || [];
+    const rosterList = getSheetDataAsObjects(CONFIG.SHEET_ROSTER) || [];
+    const shifts = getSheetDataAsObjects(CONFIG.SHEET_SHIFT) || [];
+    const absensi = getSheetDataAsObjects(CONFIG.SHEET_ABSENSI) || [];
+    const allIzin = getSheetDataAsObjects(CONFIG.SHEET_IZIN) || [];
+
+    // Filter staf operasional aktif
+    const activeStaff = employees.filter(e => {
+      if (!e || e.status_akun !== 'Approved' || e.status_kerja === 'Resign') return false;
+      const roleStr = (e.role || '').toString().toLowerCase();
+      if (roleStr.includes('admin')) return false;
+      if (targetDept && e.departemen !== targetDept) return false;
+      return true;
+    });
+
+    const unattendedList = [];
+
+    activeStaff.forEach(emp => {
+      const nik = String(emp.nik).trim();
+
+      // 1. Cek apakah sudah absen masuk hari ini atau sesi shift malam kemarin masih berjalan secara sah
+      const hasClockedInToday = absensi.some(a => a && String(a.nik).trim() === nik && normalizeDateToYMD(a.tanggal) === todayYMD && a.jam_masuk && a.jam_masuk !== '');
+      const yesterdayRecord = absensi.find(a => a && String(a.nik).trim() === nik && normalizeDateToYMD(a.tanggal) === yesterdayYMD && a.jam_masuk && a.jam_masuk !== '' && (!a.jam_pulang || a.jam_pulang === '' || a.jam_pulang === '-'));
+      let hasOvernightActive = false;
+      if (yesterdayRecord) {
+        const rosterYesterday = rosterList.find(r => r && String(r.nik).trim() === nik && normalizeDateToYMD(r.tanggal) === yesterdayYMD);
+        const yRosterShiftVal = rosterYesterday ? (rosterYesterday.id_shift || rosterYesterday.status_hari || '') : '';
+        hasOvernightActive = isLegitimateOvernightSession(yesterdayRecord, yRosterShiftVal, shifts, todayDate);
+      }
+      if (hasClockedInToday || hasOvernightActive) {
+        return; // Sudah bertugas
+      }
+
+      // 2. Cek jadwal roster hari ini
+      const rosterToday = rosterList.find(r => r && String(r.nik).trim() === nik && normalizeDateToYMD(r.tanggal) === todayYMD);
+      let rawShiftCode = rosterToday ? (rosterToday.id_shift || rosterToday.status_hari || '').toString().trim() : '';
+
+      // Abaikan jika tidak memiliki jam operasional aktif (OFF, Cuti/Izin, atau penugasan non-jam seperti SC, BKT, Bogor, dll)
+      if (!hasOperationalHours(rawShiftCode, shifts)) {
+        return;
+      }
+
+      // 3. Cek izin/cuti resmi yang sudah disetujui
+      const hasApprovedLeave = allIzin.some(i => {
+        if (!i || String(i.nik).trim() !== nik) return false;
+        const status = (i.status_persetujuan || '').toString();
+        if (status !== 'Approved' && status !== 'Approved_HOD') return false;
+        const sYMD = normalizeDateToYMD(i.tanggal_mulai);
+        const eYMD = normalizeDateToYMD(i.tanggal_selesai || i.tanggal_mulai);
+        if (!sYMD) return false;
+        return (sYMD <= todayYMD && (eYMD ? eYMD >= todayYMD : sYMD >= todayYMD));
+      });
+      if (hasApprovedLeave) {
+        return;
+      }
+
+      // 4. Informasi Shift
+      let shiftObj = null;
+      let shiftDisplay = 'Jadwal Reguler';
+      let jamMasukJadwal = '';
+
+      const rawUpper = (rawShiftCode || '').toUpperCase();
+      if (rawUpper) {
+        shiftObj = shifts.find(s => s && String(s.id_shift).trim().toUpperCase() === rawUpper);
+        if (shiftObj) {
+          shiftDisplay = (shiftObj.nama_shift || rawShiftCode) + (shiftObj.jam_masuk ? (' (' + shiftObj.jam_masuk + ' - ' + (shiftObj.jam_pulang || '') + ')') : '');
+          jamMasukJadwal = shiftObj.jam_masuk || '';
+        } else {
+          shiftDisplay = rawShiftCode;
+        }
+      } else {
+        const defShift = shifts[0];
+        if (defShift) {
+          shiftDisplay = (defShift.nama_shift || 'Shift Default') + (defShift.jam_masuk ? (' (' + defShift.jam_masuk + ' - ' + (defShift.jam_pulang || '') + ')') : '');
+          jamMasukJadwal = defShift.jam_masuk || '';
+        }
+      }
+
+      // 5. Cek keterlambatan jam masuk
+      let isOverdue = false;
+      let statusKeterangan = 'Belum Hadir';
+
+      if (jamMasukJadwal && jamMasukJadwal.includes(':')) {
+        const [inHour, inMin] = jamMasukJadwal.split(':').map(Number);
+        const schedTime = new Date(todayDate.getFullYear(), todayDate.getMonth(), todayDate.getDate(), inHour, inMin, 0);
+        const toleranceMs = (shiftObj && shiftObj.toleransi_terlambat_menit ? parseInt(shiftObj.toleransi_terlambat_menit, 10) : 15) * 60 * 1000;
+        
+        if (todayDate.getTime() > schedTime.getTime() + toleranceMs) {
+          isOverdue = true;
+          const minsLate = Math.round((todayDate.getTime() - schedTime.getTime()) / 60000);
+          statusKeterangan = 'Terlambat ' + minsLate + 'm (Potensi ALPA)';
+        } else if (todayDate.getTime() >= schedTime.getTime()) {
+          statusKeterangan = 'Masa Toleransi Masuk';
+        } else {
+          statusKeterangan = 'Shift Belum Mulai';
+        }
+      } else {
+        statusKeterangan = 'Belum Ada Jam Shift Pasti';
+      }
+
+      // WhatsApp direct link generator
+      const rawPhone = (emp.no_telp || '').toString().trim();
+      let cleanPhone = rawPhone.replace(/[^0-9]/g, '');
+      if (cleanPhone.startsWith('0')) {
+        cleanPhone = '62' + cleanPhone.substring(1);
+      } else if (cleanPhone && !cleanPhone.startsWith('62')) {
+        cleanPhone = '62' + cleanPhone;
+      }
+
+      let waUrl = '';
+      if (cleanPhone.length >= 9) {
+        const waMsg = 'Halo Rekan ' + emp.nama + ', Anda terjadwal masuk shift: ' + shiftDisplay + ' hari ini di The Balcone Suites & Resort namun belum tercatat presensi di sistem. Mohon konfirmasi kehadiran atau kendala Anda. Terima kasih.';
+        waUrl = 'https://wa.me/' + cleanPhone + '?text=' + encodeURIComponent(waMsg);
+      }
+
+      unattendedList.push({
+        nik: emp.nik,
+        nama: emp.nama || 'Tanpa Nama',
+        departemen: emp.departemen || '-',
+        jabatan: emp.jabatan || '-',
+        no_telp: emp.no_telp || '',
+        shift: shiftDisplay,
+        jam_masuk_jadwal: jamMasukJadwal,
+        status_keterangan: statusKeterangan,
+        is_overdue: isOverdue,
+        wa_url: waUrl
+      });
+    });
+
+    unattendedList.sort((a, b) => (b.is_overdue === true ? 1 : 0) - (a.is_overdue === true ? 1 : 0));
+    return unattendedList;
+  } catch (err) {
+    Logger.log('Error getUnattendedEmployeesToday: ' + err.toString());
+    return [];
+  }
+}
+
+/**
+ * Audit Otomatis Harian Staf ALPA (Dapat dipanggil via Daily Trigger Apps Script / UI Admin)
+ */
+function auditDailyUnattendedEmployees() {
+  try {
+    const unattended = getUnattendedEmployeesToday(null);
+    const overdueStaff = unattended.filter(u => u && u.is_overdue);
+    Logger.log('Audit ALPA Harian: Ditemukan ' + overdueStaff.length + ' staf berpotensi ALPA dari total ' + unattended.length + ' yang belum hadir.');
+    return {
+      success: true,
+      totalUnattended: unattended.length,
+      overdueCount: overdueStaff.length,
+      overdueStaff: overdueStaff
+    };
+  } catch (err) {
+    Logger.log('Error auditDailyUnattendedEmployees: ' + err.toString());
     return { success: false, message: err.toString() };
   }
 }
@@ -1413,13 +2176,15 @@ function getHODDashboard(nik, departemen) {
     getOrCreateTukarShiftSheet(ss);
     const allTukar = getSheetDataAsObjects(CONFIG.SHEET_TUKAR_SHIFT) || [];
     const pendingTukarShiftHOD = allTukar.filter(t => t && t.departemen === departemen && t.status === 'Pending_HOD').reverse();
+    const deptUnattendedToday = getUnattendedEmployeesToday(departemen);
 
     return {
       success: true,
       deptEmployees: deptEmployees,
       pendingIzinHOD: pendingIzinHOD,
       pendingTukarShiftHOD: pendingTukarShiftHOD,
-      deptIzinHistory: deptIzinHistory
+      deptIzinHistory: deptIzinHistory,
+      deptUnattendedToday: deptUnattendedToday
     };
   } catch (err) {
     return { success: false, message: err.toString() };
@@ -1448,9 +2213,13 @@ function getAdminDashboard() {
     });
 
     const todayAbsensi = absensi.filter(a => a && a.tanggal === todayStr);
-    const totalHadirToday = todayAbsensi.filter(a => a && (a.status === 'Tepat Waktu' || a.status === 'Terlambat')).length;
-    const totalTerlambatToday = todayAbsensi.filter(a => a && a.status === 'Terlambat').length;
+    const totalHadirToday = todayAbsensi.filter(a => a && a.jam_masuk && a.jam_masuk !== '').length;
+    const totalTerlambatToday = todayAbsensi.filter(a => a && a.status && a.status.toString().includes('Terlambat')).length;
+    const totalPulangCepatToday = todayAbsensi.filter(a => a && a.status && a.status.toString().includes('Pulang Cepat')).length;
     
+    const unattendedToday = getUnattendedEmployeesToday(null);
+    const totalUnattendedToday = unattendedToday.filter(u => u.is_overdue).length;
+
     const mappedIzinList = izinList.map(i => {
       if (!i) return {};
       const emp = karyawan.find(e => e && e.nik === i.nik) || {};
@@ -1486,11 +2255,14 @@ function getAdminDashboard() {
         totalKaryawan: operationalEmployees.filter(k => k && k.status_akun === 'Approved' && (k.status_kerja !== 'Resign')).length,
         totalHadirToday: totalHadirToday,
         totalTerlambatToday: totalTerlambatToday,
+        totalPulangCepatToday: totalPulangCepatToday,
+        totalUnattendedToday: totalUnattendedToday,
         totalPendingIzin: pendingIzinHRD.length,
         totalPendingKaryawan: pendingKaryawan.length,
         totalPendingEditProfil: pendingEditProfil.length,
         totalPendingResetDevice: pendingResetDevice.length
       },
+      unattendedToday: unattendedToday,
       pendingIzin: pendingIzinHRD,
       allIzin: mappedIzinList,
       pendingKaryawan: pendingKaryawan,
@@ -2051,6 +2823,156 @@ function approveKaryawan(nik, actionStatus) {
   }
 }
 
+/**
+ * Format Date ke teks tanggal formal Indonesia (Contoh: 15 Maret 2025)
+ */
+function formatDateIndonesian(dateObj) {
+  if (!dateObj || !(dateObj instanceof Date) || isNaN(dateObj.getTime())) return '-';
+  const months = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+  const day = String(dateObj.getDate()).padStart(2, '0');
+  const month = months[dateObj.getMonth()];
+  const year = dateObj.getFullYear();
+  return day + ' ' + month + ' ' + year;
+}
+
+/**
+ * Sinkronisasi sisa cuti tahunan hasil kalkulasi siklus ke Tabel_Karyawan di Google Sheets
+ */
+function syncEmployeeLeaveBalanceInSheet(nik, calculatedRemainingDays, empRowIndex) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheetEmp = ss.getSheetByName(CONFIG.SHEET_KARYAWAN);
+    if (!sheetEmp) return;
+    let targetRow = empRowIndex;
+    if (!targetRow) {
+      const empData = getSheetDataAsObjects(CONFIG.SHEET_KARYAWAN) || [];
+      const idx = empData.findIndex(e => e && String(e.nik).trim() === String(nik).trim());
+      if (idx !== -1) targetRow = idx + 2;
+    }
+    if (targetRow) {
+      const currentVal = sheetEmp.getRange(targetRow, 18).getValue();
+      if (String(currentVal).trim() !== String(calculatedRemainingDays)) {
+        sheetEmp.getRange(targetRow, 18).setValue(String(calculatedRemainingDays));
+      }
+    }
+  } catch (e) {
+    // Non-blocking sync error
+  }
+}
+
+/**
+ * Kalkulator Siklus Cuti Tahunan:
+ * 1. Masa kerja < 1 tahun dari tgl_masuk: Belum berhak cuti tahunan (isEligible: false, kuota: 0).
+ * 2. Masa kerja >= 1 tahun: Berhak 12 hari per siklus tahunan (anniversary date).
+ * 3. Expired otomatis: Cuti tahun lalu otomatis hangus dan di-reset ke 12 hari pada siklus baru.
+ */
+function calculateEmployeeLeaveStatus(emp, asOfDate, allIzinList) {
+  const result = {
+    isEligible: false,
+    tglMasukRaw: '',
+    tglMasukFormatted: '-',
+    activeFromDate: '',
+    activeFromFormatted: '-',
+    cycleStart: '',
+    cycleStartFormatted: '-',
+    cycleEnd: '',
+    cycleEndFormatted: '-',
+    nextAnniversary: '',
+    nextAnnivFormatted: '-',
+    quotaDays: 12,
+    takenDays: 0,
+    remainingDays: 0,
+    message: ''
+  };
+
+  if (!emp) {
+    result.message = 'Data karyawan tidak ditemukan.';
+    return result;
+  }
+
+  const rawTglMasuk = emp.tgl_masuk || '';
+  result.tglMasukRaw = rawTglMasuk ? rawTglMasuk.toString().trim() : '';
+  const dMasuk = parseDateStrToDate(result.tglMasukRaw);
+
+  if (!dMasuk || isNaN(dMasuk.getTime())) {
+    result.isEligible = false;
+    result.message = 'Tanggal masuk kerja belum terdata di sistem HR.';
+    return result;
+  }
+
+  result.tglMasukFormatted = formatDateIndonesian(dMasuk);
+
+  const refDate = (asOfDate instanceof Date && !isNaN(asOfDate.getTime())) ? asOfDate : new Date();
+  const refYMD = normalizeDateToYMD(refDate);
+
+  // Tanggal genap 1 tahun masa kerja (Hak cuti pertama aktif)
+  const anniv1 = new Date(dMasuk.getFullYear() + 1, dMasuk.getMonth(), dMasuk.getDate());
+  const anniv1YMD = normalizeDateToYMD(anniv1);
+  result.activeFromDate = Utilities.formatDate(anniv1, 'Asia/Jakarta', 'yyyy-MM-dd');
+  result.activeFromFormatted = formatDateIndonesian(anniv1);
+
+  let baseQuota = parseInt(emp.kuota_cuti_tahunan || '12', 10);
+  if (isNaN(baseQuota) || baseQuota <= 0) baseQuota = 12;
+  result.quotaDays = baseQuota;
+
+  // Skenario A: Belum genap 1 tahun masa kerja (< 1 tahun)
+  if (refYMD < anniv1YMD) {
+    result.isEligible = false;
+    result.remainingDays = 0;
+    result.takenDays = 0;
+    result.message = 'Anda belum memiliki hak Cuti Tahunan. Hak cuti tahunan Anda (' + baseQuota + ' hari) akan aktif pada tanggal ' + result.activeFromFormatted + ' (setelah 1 tahun masa kerja).';
+    return result;
+  }
+
+  // Skenario B: Masa kerja sudah >= 1 tahun (Hak Cuti Tahunan Aktif)
+  result.isEligible = true;
+
+  // Hitung siklus tahunan berjalan (anniversary cycle)
+  const annivThisYear = new Date(refDate.getFullYear(), dMasuk.getMonth(), dMasuk.getDate());
+  const annivThisYearYMD = normalizeDateToYMD(annivThisYear);
+
+  let cycleStart, cycleEnd, nextAnniv;
+  if (refYMD >= annivThisYearYMD) {
+    cycleStart = annivThisYear;
+    cycleEnd = new Date(refDate.getFullYear() + 1, dMasuk.getMonth(), dMasuk.getDate() - 1);
+    nextAnniv = new Date(refDate.getFullYear() + 1, dMasuk.getMonth(), dMasuk.getDate());
+  } else {
+    cycleStart = new Date(refDate.getFullYear() - 1, dMasuk.getMonth(), dMasuk.getDate());
+    cycleEnd = new Date(refDate.getFullYear(), dMasuk.getMonth(), dMasuk.getDate() - 1);
+    nextAnniv = annivThisYear;
+  }
+
+  result.cycleStart = Utilities.formatDate(cycleStart, 'Asia/Jakarta', 'yyyy-MM-dd');
+  result.cycleStartFormatted = formatDateIndonesian(cycleStart);
+  result.cycleEnd = Utilities.formatDate(cycleEnd, 'Asia/Jakarta', 'yyyy-MM-dd');
+  result.cycleEndFormatted = formatDateIndonesian(cycleEnd);
+  result.nextAnniversary = Utilities.formatDate(nextAnniv, 'Asia/Jakarta', 'yyyy-MM-dd');
+  result.nextAnnivFormatted = formatDateIndonesian(nextAnniv);
+
+  const cycleStartYMD = normalizeDateToYMD(cycleStart);
+  const cycleEndYMD = normalizeDateToYMD(cycleEnd);
+
+  // Hitung cuti tahunan yang telah di-approve KHUSUS dalam periode siklus berjalan
+  const izinList = allIzinList || getSheetDataAsObjects(CONFIG.SHEET_IZIN) || [];
+  let takenDays = 0;
+  izinList.forEach(iz => {
+    if (!iz || String(iz.nik).trim() !== String(emp.nik).trim()) return;
+    if (iz.jenis !== 'Cuti Tahunan') return;
+    const status = (iz.status_persetujuan || '').toString();
+    if (status !== 'Approved' && status !== 'Approved_HOD') return;
+
+    const startYMD = normalizeDateToYMD(iz.tanggal_mulai);
+    if (startYMD && startYMD >= cycleStartYMD && startYMD <= cycleEndYMD) {
+      takenDays += parseInt(iz.jumlah_hari || '0', 10);
+    }
+  });
+
+  result.takenDays = takenDays;
+  result.remainingDays = Math.max(0, baseQuota - takenDays);
+  result.message = 'Hak cuti tahunan aktif: Sisa ' + result.remainingDays + ' hari (Berlaku s.d. ' + result.cycleEndFormatted + ').';
+  return result;
+}
+
 function submitIzinCuti(nik, tglMulai, tglSelesai, jumlahHari, jenis, alasan) {
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -2059,11 +2981,22 @@ function submitIzinCuti(nik, tglMulai, tglSelesai, jumlahHari, jenis, alasan) {
 
     if (!emp) return { success: false, message: 'Data karyawan tidak ditemukan.' };
 
-    // Validasi kuota jika Cuti Tahunan (Cuti Khusus / Lainnya TIDAK memotong kuota)
+    // Validasi kuota dan masa kerja jika Cuti Tahunan (Cuti Khusus / Lainnya TIDAK memotong kuota)
     if (jenis === 'Cuti Tahunan') {
-      const sisaCuti = parseInt(emp.sisa_cuti_tahunan || '0', 10);
-      if (parseInt(jumlahHari, 10) > sisaCuti) {
-        return { success: false, message: 'Sisa kuota cuti tahunan Anda (' + sisaCuti + ' hari) tidak mencukupi.' };
+      const allIzin = getSheetDataAsObjects(CONFIG.SHEET_IZIN) || [];
+      const leaveStatus = calculateEmployeeLeaveStatus(emp, new Date(), allIzin);
+      if (!leaveStatus.isEligible) {
+        return {
+          success: false,
+          message: 'Anda belum memiliki hak Cuti Tahunan. Hak cuti tahunan Anda (' + leaveStatus.quotaDays + ' hari) baru akan aktif pada tanggal ' + leaveStatus.activeFromFormatted + ' (setelah 1 tahun masa kerja).'
+        };
+      }
+      const reqDays = parseInt(jumlahHari, 10);
+      if (reqDays > leaveStatus.remainingDays) {
+        return {
+          success: false,
+          message: 'Sisa kuota cuti tahunan Anda periode ini (' + leaveStatus.remainingDays + ' hari, berlaku s.d. ' + leaveStatus.cycleEndFormatted + ') tidak mencukupi untuk pengajuan ' + reqDays + ' hari.'
+        };
       }
     }
 
@@ -2132,9 +3065,11 @@ function approveIzinCuti(idIzin, action, rejectionReason) {
         const empIdx = empData.findIndex(e => e && e.nik === item.nik);
         
         if (empIdx !== -1) {
-          const currentSisa = parseInt(empData[empIdx].sisa_cuti_tahunan || '0', 10);
-          const cutiDays = parseInt(item.jumlah_hari, 10);
-          sheetEmp.getRange(empIdx + 2, 18).setValue(Math.max(0, currentSisa - cutiDays).toString());
+          const empTarget = empData[empIdx];
+          const allIzin = getSheetDataAsObjects(CONFIG.SHEET_IZIN) || [];
+          const updatedIzin = allIzin.map(iz => (iz && iz.id_izin === idIzin) ? Object.assign({}, iz, { status_persetujuan: 'Approved' }) : iz);
+          const updatedLeaveStatus = calculateEmployeeLeaveStatus(empTarget, new Date(), updatedIzin);
+          sheetEmp.getRange(empIdx + 2, 18).setValue(updatedLeaveStatus.remainingDays.toString());
         }
       }
 
@@ -2717,7 +3652,7 @@ function calculateMonthlyKPI(bulanTahun) {
   }
 }
 
-function getAttendanceAndLeaveResume(startDate, endDate, filterDept) {
+function getAttendanceAndLeaveResume(startDate, endDate, filterDept, searchKey) {
   try {
     const employeesAll = getSheetDataAsObjects(CONFIG.SHEET_KARYAWAN) || [];
     let karyawan = employeesAll.filter(k => {
@@ -2728,6 +3663,14 @@ function getAttendanceAndLeaveResume(startDate, endDate, filterDept) {
 
     if (filterDept && filterDept !== 'ALL') {
       karyawan = karyawan.filter(k => k.departemen === filterDept);
+    }
+
+    if (searchKey && searchKey.trim() !== '') {
+      const key = searchKey.toLowerCase().trim();
+      karyawan = karyawan.filter(k => 
+        (k.nama && k.nama.toLowerCase().includes(key)) ||
+        (k.nik && k.nik.toLowerCase().includes(key))
+      );
     }
 
     // Default ke cutoff berjalan jika kosong
@@ -2757,41 +3700,7 @@ function getAttendanceAndLeaveResume(startDate, endDate, filterDept) {
     const izinAll = getSheetDataAsObjects(CONFIG.SHEET_IZIN) || [];
     const shiftsAll = getSheetDataAsObjects(CONFIG.SHEET_SHIFT) || [];
 
-    // Helper: Deteksi apakah sebuah shift/schedule merupakan jadwal tanpa jam (Bogor, Bukittinggi, Luar Kota, Remote, dll)
-    const isNoHoursSchedule = (val) => {
-      if (!val) return false;
-      const sStr = val.toString().trim().toLowerCase();
-      if (sStr.includes('bogor') || 
-          sStr.includes('bukittinggi') || 
-          sStr.includes('tanpa jam') || 
-          sStr.includes('non jam') ||
-          sStr.includes('dinas') || 
-          sStr.includes('luar kota') || 
-          sStr.includes('remote') || 
-          sStr.includes('tugas luar')) {
-        return true;
-      }
-      if (Array.isArray(shiftsAll)) {
-        const matched = shiftsAll.find(s => s && (
-          (s.id_shift && s.id_shift.toString().trim().toLowerCase() === sStr) ||
-          (s.nama_shift && s.nama_shift.toString().trim().toLowerCase() === sStr)
-        ));
-        if (matched) {
-          const namaLower = (matched.nama_shift || '').toString().toLowerCase();
-          if (namaLower.includes('bogor') || namaLower.includes('bukittinggi') || namaLower.includes('dinas') || namaLower.includes('tanpa jam') || namaLower.includes('remote')) {
-            return true;
-          }
-          const masuk = (matched.jam_masuk || '').toString().trim();
-          const pulang = (matched.jam_pulang || '').toString().trim();
-          const emptyMasuk = !masuk || masuk === '-' || masuk === '' || masuk === '00:00';
-          const emptyPulang = !pulang || pulang === '-' || pulang === '' || pulang === '00:00';
-          if (emptyMasuk && emptyPulang) {
-            return true;
-          }
-        }
-      }
-      return false;
-    };
+    const todayYMD = normalizeDateToYMD(new Date());
 
     // Filter absensi dalam rentang
     const absensiInRange = absensiAll.filter(a => a && a.tanggal && isDateInRange(a.tanggal, startDate, endDate));
@@ -2828,6 +3737,12 @@ function getAttendanceAndLeaveResume(startDate, endDate, filterDept) {
     approvedIzin.forEach(iz => {
       const emp = employeesAll.find(e => e && e.nik === iz.nik);
       if (filterDept && filterDept !== 'ALL' && emp && emp.departemen !== filterDept) return;
+      if (searchKey && searchKey.trim() !== '') {
+        const key = searchKey.toLowerCase().trim();
+        const n = (emp ? emp.nama : (iz.nama || '')).toLowerCase();
+        const nik = (iz.nik || '').toLowerCase();
+        if (!n.includes(key) && !nik.includes(key)) return;
+      }
 
       const jenisLower = (iz.jenis || '').toString().toLowerCase();
       let kategoriKode = 'I';
@@ -2886,6 +3801,7 @@ function getAttendanceAndLeaveResume(startDate, endDate, filterDept) {
     let totalScheduledResort = 0;
     let totalHadirResort = 0;
     let totalTanpaJamResort = 0;
+    let totalAlpaResort = 0;
 
     const employeeAttendance = karyawan.map(emp => {
       const empNik = String(emp.nik).trim();
@@ -2904,18 +3820,39 @@ function getAttendanceAndLeaveResume(startDate, endDate, filterDept) {
       let hariOff = 0;
       let hariCuti = 0;
       let hariTanpaJam = 0;
+      let hariAlpa = 0;
+      const alpaDatesList = [];
 
       if (empRoster.length > 0) {
         empRoster.forEach(r => {
           const shiftVal = (r.id_shift || r.status_hari || '').toString().trim();
+          const rYMD = normalizeDateToYMD(r.tanggal);
+
           if (shiftVal === 'OFF') {
             hariOff++;
           } else if (['CT', 'PH', 'EO', 'S', 'I', 'CK'].includes(shiftVal)) {
             hariCuti++;
-          } else if (isNoHoursSchedule(shiftVal)) {
+          } else if (isNoHoursSchedule(shiftVal, shiftsAll)) {
             hariTanpaJam++;
           } else if (shiftVal !== '') {
             hariWajibKerja++;
+
+            // Evaluasi ALPA: jadwal wajib hadir, tanggal sudah lewat (past days), tidak absen masuk, dan tidak ada cuti/izin resmi
+            if (rYMD && rYMD < todayYMD) {
+              const hasAtt = empAbsensi.some(a => a && normalizeDateToYMD(a.tanggal) === rYMD && a.jam_masuk && a.jam_masuk !== '');
+              if (!hasAtt) {
+                const hasLeave = approvedIzin.some(iz => {
+                  if (String(iz.nik).trim() !== empNik) return false;
+                  const sYMD = normalizeDateToYMD(iz.tanggal_mulai);
+                  const eYMD = normalizeDateToYMD(iz.tanggal_selesai || iz.tanggal_mulai);
+                  return sYMD && sYMD <= rYMD && (eYMD ? eYMD >= rYMD : sYMD >= rYMD);
+                });
+                if (!hasLeave) {
+                  hariAlpa++;
+                  alpaDatesList.push(rYMD);
+                }
+              }
+            }
           }
         });
       } else {
@@ -2937,6 +3874,7 @@ function getAttendanceAndLeaveResume(startDate, endDate, filterDept) {
       totalScheduledResort += hariWajibKerja;
       totalHadirResort += totalHadir;
       totalTanpaJamResort += hariTanpaJam;
+      totalAlpaResort += hariAlpa;
 
       let statusKPI = '100% (Mencapai Target)';
       let statusColor = 'emerald';
@@ -2960,6 +3898,8 @@ function getAttendanceAndLeaveResume(startDate, endDate, filterDept) {
         departemen: emp.departemen,
         hari_wajib: hariWajibKerja,
         total_hadir: totalHadir,
+        hari_alpa: hariAlpa,
+        alpa_dates: alpaDatesList,
         hari_off: hariOff,
         hari_cuti: Math.max(hariCuti, empIzinDays),
         hari_tanpa_jam: hariTanpaJam,
@@ -2983,6 +3923,7 @@ function getAttendanceAndLeaveResume(startDate, endDate, filterDept) {
       startDate: startDate,
       endDate: endDate,
       filterDept: filterDept || 'ALL',
+      searchKey: searchKey || '',
       summary: {
         totalKaryawan: karyawan.length,
         rataRataKehadiran: rataRataResort,
@@ -2990,6 +3931,7 @@ function getAttendanceAndLeaveResume(startDate, endDate, filterDept) {
         totalHariWajib: totalScheduledResort,
         totalHadirRiil: totalHadirResort,
         totalTanpaJam: totalTanpaJamResort,
+        totalAlpaResort: totalAlpaResort,
         leaveStats: leaveStats
       },
       employeeAttendance: employeeAttendance,
@@ -3000,9 +3942,9 @@ function getAttendanceAndLeaveResume(startDate, endDate, filterDept) {
   }
 }
 
-function generateResumeAttendancePDFReport(startDate, endDate, filterDept) {
+function generateResumeAttendancePDFReport(startDate, endDate, filterDept, searchKey) {
   try {
-    const resumeRes = getAttendanceAndLeaveResume(startDate, endDate, filterDept);
+    const resumeRes = getAttendanceAndLeaveResume(startDate, endDate, filterDept, searchKey);
     if (!resumeRes || !resumeRes.success) {
       return { success: false, message: resumeRes ? resumeRes.message : 'Gagal menghasilkan resume.' };
     }
@@ -3017,6 +3959,7 @@ function generateResumeAttendancePDFReport(startDate, endDate, filterDept) {
     const dispStart = formatDisplayDateID(startStr);
     const dispEnd = formatDisplayDateID(endStr);
     const deptLabel = (deptStr !== 'ALL') ? deptStr : 'Semua Departemen';
+    const searchLabel = (searchKey && searchKey.trim() !== '') ? (' &bull; Pencarian: <b>\"' + searchKey.trim() + '\"</b>') : '';
 
     let html = '<div style="font-family:Arial, sans-serif; padding:15px; color:#1e293b; font-size:10px;">';
     
@@ -3024,20 +3967,21 @@ function generateResumeAttendancePDFReport(startDate, endDate, filterDept) {
     html += '<h2 style="text-align:center; color:#1e1b4b; margin:0 0 4px 0; font-size:15px; letter-spacing:0.5px;">THE BALCONE SUITES & RESORT</h2>';
     html += '<h4 style="text-align:center; color:#4338ca; margin:0 0 4px 0; font-size:12px; text-transform:uppercase;">RESUME EVALUASI KEHADIRAN & PENGAMBILAN CUTI KARYAWAN</h4>';
     html += '<p style="text-align:center; font-size:10px; color:#64748b; margin:0 0 14px 0;">' +
-      'Periode: <b>' + dispStart + ' s/d ' + dispEnd + '</b> &bull; Departemen: <b>' + deptLabel + '</b>' +
+      'Periode: <b>' + dispStart + ' s/d ' + dispEnd + '</b> &bull; Departemen: <b>' + deptLabel + '</b>' + searchLabel +
       '</p>';
 
     // Summary Box
     html += '<div style="background-color:#f8fafc; border:1px solid #cbd5e1; border-radius:6px; padding:10px; margin-bottom:15px;">';
     html += '<table style="width:100%; font-size:9.5px; border-collapse:collapse;">';
     html += '<tr>' +
-      '<td style="width:25%; padding:4px;"><b>Total Karyawan:</b> ' + s.totalKaryawan + ' Orang</td>' +
-      '<td style="width:25%; padding:4px;"><b>Rata-rata Kehadiran:</b> <span style="color:#059669; font-weight:bold;">' + s.rataRataKehadiran + '%</span> (Target: 100%)</td>' +
-      '<td style="width:25%; padding:4px;"><b>Hari Kerja Terjadwal:</b> ' + s.totalHariWajib + ' Hari</td>' +
-      '<td style="width:25%; padding:4px;"><b>Total Hadir Riil:</b> ' + s.totalHadirRiil + ' Hari</td>' +
+      '<td style="width:20%; padding:4px;"><b>Total Karyawan:</b> ' + s.totalKaryawan + ' Orang</td>' +
+      '<td style="width:20%; padding:4px;"><b>Rata Kehadiran:</b> <span style="color:#059669; font-weight:bold;">' + s.rataRataKehadiran + '%</span></td>' +
+      '<td style="width:20%; padding:4px;"><b>Hari Wajib:</b> ' + s.totalHariWajib + ' Hari</td>' +
+      '<td style="width:20%; padding:4px;"><b>Total Hadir:</b> ' + s.totalHadirRiil + ' Hari</td>' +
+      '<td style="width:20%; padding:4px;"><b>Total Alpa:</b> <span style="color:' + ((s.totalAlpaResort || 0) > 0 ? '#dc2626; font-weight:bold;' : '#64748b;') + '">' + (s.totalAlpaResort || 0) + ' Hari</span></td>' +
       '</tr>';
     html += '<tr>' +
-      '<td colspan="4" style="padding:6px 4px 2px 4px; border-top:1px dashed #cbd5e1; color:#475569;">' +
+      '<td colspan="5" style="padding:6px 4px 2px 4px; border-top:1px dashed #cbd5e1; color:#475569;">' +
       '<b>Rekapitulasi Cuti & Izin Diambil:</b> ' +
       'Cuti Tahunan (CT): <b>' + s.leaveStats.cutiTahunan + '</b> Hr &bull; ' +
       'Public Holiday (PH): <b>' + s.leaveStats.publikHoliday + '</b> Hr &bull; ' +
@@ -3049,7 +3993,7 @@ function generateResumeAttendancePDFReport(startDate, endDate, filterDept) {
       '</td>' +
       '</tr>';
     html += '</table>' +
-      '<p style="margin:6px 0 0 0; font-size:8px; color:#64748b; font-style:italic;">* Catatan: Hari Libur (OFF), Cuti/Izin resmi, dan Schedule penugasan tanpa jam kerja (Bogor, Bukittinggi, dll: ' + (s.totalTanpaJam || 0) + ' hari) tidak dihitung sebagai hari kerja wajib.</p>' +
+      '<p style="margin:6px 0 0 0; font-size:8px; color:#64748b; font-style:italic;">* Catatan: Hari Libur (OFF), Cuti/Izin resmi, dan Schedule penugasan tanpa jam kerja (Bogor, Bukittinggi, Sales Call/SC, dll: ' + (s.totalTanpaJam || 0) + ' hari) tidak dihitung sebagai hari kerja wajib dan tidak dikenai ALPA.</p>' +
       '</div>';
 
     // Bagian 1: Tabel Persentase Kehadiran
@@ -3060,18 +4004,19 @@ function generateResumeAttendancePDFReport(startDate, endDate, filterDept) {
       '<th style="width:65px;">NIK</th>' +
       '<th>Nama Karyawan</th>' +
       '<th>Departemen</th>' +
-      '<th style="width:45px; text-align:center;">Wajib</th>' +
-      '<th style="width:45px; text-align:center;">Hadir</th>' +
+      '<th style="width:40px; text-align:center;">Wajib</th>' +
+      '<th style="width:40px; text-align:center;">Hadir</th>' +
+      '<th style="width:40px; text-align:center;">Alpa</th>' +
       '<th style="width:35px; text-align:center;">OFF</th>' +
-      '<th style="width:40px; text-align:center;">Cuti</th>' +
-      '<th style="width:50px; text-align:center;">Non-Jam</th>' +
-      '<th style="width:50px; text-align:center;">Terlambat</th>' +
-      '<th style="width:55px; text-align:center;">% Hadir</th>' +
-      '<th style="width:80px; text-align:center;">Status KPI</th>' +
+      '<th style="width:35px; text-align:center;">Cuti</th>' +
+      '<th style="width:45px; text-align:center;">Non-Jam</th>' +
+      '<th style="width:45px; text-align:center;">Terlambat</th>' +
+      '<th style="width:50px; text-align:center;">% Hadir</th>' +
+      '<th style="width:75px; text-align:center;">Status KPI</th>' +
       '</tr>';
 
     if (empAtt.length === 0) {
-      html += '<tr><td colspan="12" style="text-align:center; padding:10px; color:#94a3b8;">Tidak ada data karyawan.</td></tr>';
+      html += '<tr><td colspan="13" style="text-align:center; padding:10px; color:#94a3b8;">Tidak ada data karyawan.</td></tr>';
     } else {
       empAtt.forEach((emp, idx) => {
         const bgRow = (idx % 2 === 1) ? '#f8fafc' : '#ffffff';
@@ -3083,6 +4028,7 @@ function generateResumeAttendancePDFReport(startDate, endDate, filterDept) {
           '<td>' + emp.departemen + '</td>' +
           '<td style="text-align:center;">' + emp.hari_wajib + '</td>' +
           '<td style="text-align:center; font-weight:bold; color:#059669;">' + emp.total_hadir + '</td>' +
+          '<td style="text-align:center;' + (emp.hari_alpa > 0 ? ' font-weight:bold; color:#dc2626; background-color:#fee2e2;' : ' color:#94a3b8;') + '">' + (emp.hari_alpa > 0 ? emp.hari_alpa : '-') + '</td>' +
           '<td style="text-align:center; color:#64748b;">' + emp.hari_off + '</td>' +
           '<td style="text-align:center; color:#7c3aed;">' + emp.hari_cuti + '</td>' +
           '<td style="text-align:center; color:#0284c7; font-weight:bold;">' + (emp.hari_tanpa_jam || 0) + '</td>' +
@@ -3152,7 +4098,8 @@ function generateResumeAttendancePDFReport(startDate, endDate, filterDept) {
 
     let periodSuffix = startStr + '_sd_' + endStr;
     const safeDeptStr = (deptStr !== 'ALL') ? deptStr + '_' : '';
-    const safeFileTitle = ('Resume_Kehadiran_Cuti_Balcone_' + safeDeptStr + periodSuffix).replace(/[^a-zA-Z0-9]/g, '_');
+    const safeSearchStr = (searchKey && searchKey.trim() !== '') ? (searchKey.trim().replace(/[^a-zA-Z0-9]/g, '_') + '_') : '';
+    const safeFileTitle = ('Resume_Kehadiran_Cuti_Balcone_' + safeDeptStr + safeSearchStr + periodSuffix).replace(/[^a-zA-Z0-9]/g, '_');
     const blob = Utilities.newBlob(html, 'text/html', safeFileTitle + '.html');
     const pdfBlob = blob.getAs('application/pdf');
     const base64Pdf = Utilities.base64Encode(pdfBlob.getBytes());
@@ -3288,34 +4235,33 @@ function getGlobalAttendanceList(searchKey, filterDept, startDateOrDateMonth, en
       limitNum = parseInt(limit) || 15;
     }
 
-    let data = getSheetDataAsObjects(CONFIG.SHEET_ABSENSI) || [];
+    if (!startDate || !endDate) {
+      const activeCut = getCutoffRange(getActiveCutoffMonthStr());
+      if (!startDate) startDate = Utilities.formatDate(activeCut.startDate, 'Asia/Jakarta', 'yyyy-MM-dd');
+      if (!endDate) endDate = Utilities.formatDate(activeCut.endDate, 'Asia/Jakarta', 'yyyy-MM-dd');
+    }
+
     const employees = getSheetDataAsObjects(CONFIG.SHEET_KARYAWAN) || [];
-    
-    data = data.map(item => {
-      if (!item) return {};
-      const emp = employees.find(e => e && e.nik === item.nik) || {};
-      return {
-        ...item,
-        nama_karyawan: emp.nama || 'N/A',
-        departemen: emp.departemen || '-'
-      };
-    }).reverse();
+    const absensi = getSheetDataAsObjects(CONFIG.SHEET_ABSENSI) || [];
+    const rosterList = getSheetDataAsObjects(CONFIG.SHEET_ROSTER) || [];
+    const allIzin = getSheetDataAsObjects(CONFIG.SHEET_IZIN) || [];
+    const shifts = getSheetDataAsObjects(CONFIG.SHEET_SHIFT) || [];
 
-    if (searchKey && searchKey.trim() !== '') {
-      const key = searchKey.toLowerCase().trim();
-      data = data.filter(d => 
-        (d.nama_karyawan && d.nama_karyawan.toLowerCase().includes(key)) || 
-        (d.nik && d.nik.toLowerCase().includes(key))
-      );
-    }
+    let targetStaff = employees.filter(e => {
+      if (!e || e.status_akun !== 'Approved' || e.status_kerja === 'Resign') return false;
+      const roleStr = (e.role || '').toString().toLowerCase();
+      if (roleStr.includes('admin')) return false;
+      if (filterDept && filterDept !== 'ALL' && e.departemen !== filterDept) return false;
+      if (searchKey && searchKey.trim() !== '') {
+        const k = searchKey.toLowerCase().trim();
+        const nama = (e.nama || '').toLowerCase();
+        const nik = (e.nik || '').toLowerCase();
+        if (!nama.includes(k) && !nik.includes(k)) return false;
+      }
+      return true;
+    });
 
-    if (filterDept && filterDept !== 'ALL') {
-      data = data.filter(d => d.departemen === filterDept);
-    }
-
-    if ((startDate && startDate.trim() !== '') || (endDate && endDate.trim() !== '')) {
-      data = data.filter(d => d.tanggal && isDateInRange(d.tanggal, startDate, endDate));
-    }
+    const data = buildContinuousAttendanceTimeline(targetStaff, startDate, endDate, absensi, rosterList, allIzin, shifts);
 
     const totalRecords = data.length;
     const pageNum = parseInt(page) || 1;
@@ -3337,34 +4283,33 @@ function getGlobalAttendanceList(searchKey, filterDept, startDateOrDateMonth, en
 
 function generateAttendancePDFReport(searchKey, filterDept, startDate, endDate) {
   try {
-    let data = getSheetDataAsObjects(CONFIG.SHEET_ABSENSI) || [];
+    if (!startDate || !endDate) {
+      const activeCut = getCutoffRange(getActiveCutoffMonthStr());
+      if (!startDate) startDate = Utilities.formatDate(activeCut.startDate, 'Asia/Jakarta', 'yyyy-MM-dd');
+      if (!endDate) endDate = Utilities.formatDate(activeCut.endDate, 'Asia/Jakarta', 'yyyy-MM-dd');
+    }
+
     const employees = getSheetDataAsObjects(CONFIG.SHEET_KARYAWAN) || [];
-    
-    data = data.map(item => {
-      if (!item) return {};
-      const emp = employees.find(e => e && e.nik === item.nik) || {};
-      return {
-        ...item,
-        nama_karyawan: emp.nama || 'N/A',
-        departemen: emp.departemen || '-'
-      };
-    }).reverse();
+    const absensi = getSheetDataAsObjects(CONFIG.SHEET_ABSENSI) || [];
+    const rosterList = getSheetDataAsObjects(CONFIG.SHEET_ROSTER) || [];
+    const allIzin = getSheetDataAsObjects(CONFIG.SHEET_IZIN) || [];
+    const shifts = getSheetDataAsObjects(CONFIG.SHEET_SHIFT) || [];
 
-    if (searchKey && searchKey.trim() !== '') {
-      const key = searchKey.toLowerCase().trim();
-      data = data.filter(d => 
-        (d.nama_karyawan && d.nama_karyawan.toLowerCase().includes(key)) || 
-        (d.nik && d.nik.toLowerCase().includes(key))
-      );
-    }
+    let targetStaff = employees.filter(e => {
+      if (!e || e.status_akun !== 'Approved' || e.status_kerja === 'Resign') return false;
+      const roleStr = (e.role || '').toString().toLowerCase();
+      if (roleStr.includes('admin')) return false;
+      if (filterDept && filterDept !== 'ALL' && e.departemen !== filterDept) return false;
+      if (searchKey && searchKey.trim() !== '') {
+        const k = searchKey.toLowerCase().trim();
+        const nama = (e.nama || '').toLowerCase();
+        const nik = (e.nik || '').toLowerCase();
+        if (!nama.includes(k) && !nik.includes(k)) return false;
+      }
+      return true;
+    });
 
-    if (filterDept && filterDept !== 'ALL') {
-      data = data.filter(d => d.departemen === filterDept);
-    }
-
-    if ((startDate && startDate.trim() !== '') || (endDate && endDate.trim() !== '')) {
-      data = data.filter(d => d.tanggal && isDateInRange(d.tanggal, startDate, endDate));
-    }
+    const data = buildContinuousAttendanceTimeline(targetStaff, startDate, endDate, absensi, rosterList, allIzin, shifts);
 
     let filterInfo = [];
     if (filterDept && filterDept !== 'ALL') filterInfo.push('Departemen: ' + filterDept);
@@ -3405,7 +4350,18 @@ function generateAttendancePDFReport(searchKey, filterDept, startDate, endDate) 
     } else {
       data.forEach((row, idx) => {
         const bgRow = (idx % 2 === 1) ? '#f8fafc' : '#ffffff';
-        const statusColor = (row.status === 'Tepat Waktu') ? '#059669' : '#e11d48';
+        let statusColor = '#059669';
+        const st = (row.status || '').toString();
+        if (st.includes('Terlambat') || st.includes('ALPA') || st.includes('Tanpa Pulang')) {
+          statusColor = '#e11d48';
+        } else if (st.includes('OFF')) {
+          statusColor = '#64748b';
+        } else if (st.includes('Cuti') || st.includes('Sakit') || st.includes('Holiday')) {
+          statusColor = '#7c3aed';
+        } else if (st.includes('Sales Call') || st.includes('Bukittinggi') || st.includes('Non-Jam')) {
+          statusColor = '#2563eb';
+        }
+
         htmlContent += '<tr style="background-color:' + bgRow + ';">' +
           '<td style="text-align:center;">' + (idx + 1) + '</td>' +
           '<td>' + (row.tanggal || '-') + '</td>' +
@@ -3466,36 +4422,37 @@ function getHODAttendanceList(hodNik, searchKey, startDateOrDateMonth, endDateOr
       limitNum = parseInt(limit) || 15;
     }
 
+    if (!startDate || !endDate) {
+      const activeCut = getCutoffRange(getActiveCutoffMonthStr());
+      if (!startDate) startDate = Utilities.formatDate(activeCut.startDate, 'Asia/Jakarta', 'yyyy-MM-dd');
+      if (!endDate) endDate = Utilities.formatDate(activeCut.endDate, 'Asia/Jakarta', 'yyyy-MM-dd');
+    }
+
     const employees = getSheetDataAsObjects(CONFIG.SHEET_KARYAWAN) || [];
     const hod = employees.find(e => e && e.nik === hodNik);
     if (!hod) return { success: false, message: 'Data HOD tidak ditemukan.' };
     const dept = hod.departemen;
 
-    let data = getSheetDataAsObjects(CONFIG.SHEET_ABSENSI) || [];
-    data = data.map(item => {
-      if (!item) return {};
-      const emp = employees.find(e => e && e.nik === item.nik) || {};
-      return {
-        ...item,
-        nama_karyawan: emp.nama || 'N/A',
-        departemen: emp.departemen || '-'
-      };
-    }).reverse();
+    const absensi = getSheetDataAsObjects(CONFIG.SHEET_ABSENSI) || [];
+    const rosterList = getSheetDataAsObjects(CONFIG.SHEET_ROSTER) || [];
+    const allIzin = getSheetDataAsObjects(CONFIG.SHEET_IZIN) || [];
+    const shifts = getSheetDataAsObjects(CONFIG.SHEET_SHIFT) || [];
 
-    // Data isolation: hanya staf di departemen HOD
-    data = data.filter(d => d.departemen === dept);
+    let targetStaff = employees.filter(e => {
+      if (!e || e.status_akun !== 'Approved' || e.status_kerja === 'Resign') return false;
+      const roleStr = (e.role || '').toString().toLowerCase();
+      if (roleStr.includes('admin')) return false;
+      if (e.departemen !== dept) return false;
+      if (searchKey && searchKey.trim() !== '') {
+        const k = searchKey.toLowerCase().trim();
+        const nama = (e.nama || '').toLowerCase();
+        const nik = (e.nik || '').toLowerCase();
+        if (!nama.includes(k) && !nik.includes(k)) return false;
+      }
+      return true;
+    });
 
-    if (searchKey && searchKey.trim() !== '') {
-      const key = searchKey.toLowerCase().trim();
-      data = data.filter(d => 
-        (d.nama_karyawan && d.nama_karyawan.toLowerCase().includes(key)) || 
-        (d.nik && d.nik.toLowerCase().includes(key))
-      );
-    }
-
-    if ((startDate && startDate.trim() !== '') || (endDate && endDate.trim() !== '')) {
-      data = data.filter(d => d.tanggal && isDateInRange(d.tanggal, startDate, endDate));
-    }
+    const data = buildContinuousAttendanceTimeline(targetStaff, startDate, endDate, absensi, rosterList, allIzin, shifts);
 
     const totalRecords = data.length;
     const pageNum = parseInt(page) || 1;
