@@ -1365,30 +1365,91 @@ function processAbsensi(nik, userLat, userLong, qrSecretCode, actionType, offlin
 function syncOfflineAttendance(items) {
   try {
     if (!items || !Array.isArray(items) || items.length === 0) {
-      return { success: true, syncedCount: 0, totalCount: 0, message: 'Tidak ada data antrean absensi offline.' };
+      return { success: true, syncedCount: 0, resolvedCount: 0, totalCount: 0, message: 'Tidak ada data antrean absensi offline.', itemResults: [] };
     }
-    let successCount = 0;
-    let errorMsgs = [];
-    items.forEach(item => {
+
+    // Urutkan berdasarkan waktu kronologis (MASUK diproses lebih dulu daripada PULANG)
+    const sortedItems = items.slice().sort(function(a, b) {
+      return (Number(a.timestamp || 0) - Number(b.timestamp || 0));
+    });
+
+    let syncedCount = 0;
+    let resolvedCount = 0;
+    let itemResults = [];
+
+    sortedItems.forEach(item => {
       try {
         const res = processAbsensi(item.nik, item.lat, item.lng, item.qrSecretCode, item.actionType, item.timestamp);
+        
         if (res && res.success) {
-          successCount++;
+          syncedCount++;
+          resolvedCount++;
+          itemResults.push({
+            id: item.id,
+            actionType: item.actionType,
+            status: 'synced',
+            message: res.message || 'Berhasil disinkronkan ke server.'
+          });
         } else {
-          errorMsgs.push(res ? res.message : 'Gagal');
+          const errMsg = res ? (res.message || '') : 'Gagal memproses absensi';
+          const isDuplicateMasuk = errMsg.includes('sudah melakukan Absen Masuk');
+          const isDuplicatePulang = errMsg.includes('sudah melakukan Absen Pulang');
+          
+          if (isDuplicateMasuk || isDuplicatePulang) {
+            // Rekonsiliasi Duplikat Cerdas: Data presensi sudah tercatat sah di Google Sheets.
+            // Selesaikan antrean agar aman dihapus dari HP dan tidak menjadi antrean gantung.
+            resolvedCount++;
+            itemResults.push({
+              id: item.id,
+              actionType: item.actionType,
+              status: 'already_recorded',
+              message: 'Sudah tercatat di server (' + errMsg + '). Antrean diselesaikan.'
+            });
+          } else {
+            itemResults.push({
+              id: item.id,
+              actionType: item.actionType,
+              status: 'failed',
+              message: errMsg
+            });
+          }
         }
       } catch (e) {
-        errorMsgs.push(e.toString());
+        itemResults.push({
+          id: item.id,
+          actionType: item.actionType,
+          status: 'failed',
+          message: e.toString()
+        });
       }
     });
+
+    const failedCount = sortedItems.length - resolvedCount;
+    let summaryMsg = '';
+    if (resolvedCount === sortedItems.length) {
+      if (syncedCount === sortedItems.length) {
+        summaryMsg = 'Semua ' + resolvedCount + ' absensi offline berhasil disinkronkan ke server!';
+      } else {
+        summaryMsg = 'Semua ' + resolvedCount + ' absensi offline telah diselesaikan (' + (resolvedCount - syncedCount) + ' duplikat server dibersihkan).';
+      }
+    } else if (resolvedCount > 0) {
+      summaryMsg = resolvedCount + ' dari ' + sortedItems.length + ' absensi offline berhasil diproses (' + failedCount + ' tertahan).';
+    } else {
+      const firstFail = itemResults.find(r => r.status === 'failed');
+      summaryMsg = 'Gagal sinkronisasi: ' + (firstFail ? firstFail.message : 'Koneksi atau validasi ditolak');
+    }
+
     return {
-      success: successCount > 0,
-      syncedCount: successCount,
-      totalCount: items.length,
-      message: successCount + ' dari ' + items.length + ' absensi offline berhasil disinkronkan ke server.' + (errorMsgs.length > 0 ? ' (' + errorMsgs[0] + ')' : '')
+      success: true,
+      syncedCount: syncedCount,
+      resolvedCount: resolvedCount,
+      failedCount: failedCount,
+      totalCount: sortedItems.length,
+      itemResults: itemResults,
+      message: summaryMsg
     };
   } catch (err) {
-    return { success: false, message: 'Gagal sinkronisasi offline: ' + err.toString() };
+    return { success: false, message: 'Gagal sinkronisasi offline: ' + err.toString(), itemResults: [] };
   }
 }
 

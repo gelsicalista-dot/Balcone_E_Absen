@@ -594,23 +594,30 @@
 
             <!-- BANNER INDIKATOR ABSENSI OFFLINE & AUTO-SYNC -->
             <div id="banner-offline-attendance"
-                class="hidden p-3 bg-amber-500/10 border border-amber-500/30 rounded-2xl flex items-center justify-between gap-3 text-amber-900 shadow-sm">
-                <div class="flex items-center gap-2.5">
+                class="hidden p-3 bg-gradient-to-r from-amber-500/15 via-orange-500/10 to-amber-500/10 border border-amber-500/35 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-amber-950 shadow-sm transition">
+                <div class="flex items-center gap-2.5 cursor-pointer select-none flex-1" onclick="openOfflineQueueModal()">
                     <div
-                        class="w-8 h-8 rounded-xl bg-amber-500 text-white flex items-center justify-center text-xs font-bold shadow-sm">
-                        <i class="fa-solid fa-wifi"></i>
+                        class="w-9 h-9 rounded-xl bg-amber-500 text-white flex items-center justify-center text-xs font-bold shadow-sm shrink-0">
+                        <i class="fa-solid fa-wifi animate-pulse"></i>
                     </div>
                     <div>
-                        <p class="text-xs font-bold leading-tight" id="banner-offline-text">Tersimpan absensi offline
-                        </p>
-                        <p class="text-[10px] text-amber-700/80">Akan disinkronkan otomatis saat ada koneksi internet
-                        </p>
+                        <div class="flex items-center gap-2">
+                            <p class="text-xs font-bold leading-tight" id="banner-offline-text">Tersimpan absensi offline</p>
+                            <span class="text-[10px] px-2 py-0.5 rounded-full font-bold bg-amber-200/90 text-amber-900 border border-amber-300">Rincian</span>
+                        </div>
+                        <p class="text-[10px] text-amber-800/80 mt-0.5" id="banner-offline-subtext">Ketuk untuk melihat detail shift & opsi hapus antrean gantung</p>
                     </div>
                 </div>
-                <button onclick="triggerOfflineSync(false)"
-                    class="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 active:scale-95 text-white font-bold rounded-xl text-xs transition shadow-sm flex items-center gap-1.5 shrink-0">
-                    <i class="fa-solid fa-rotate"></i> Sinkronkan
-                </button>
+                <div class="flex items-center gap-2 w-full sm:w-auto justify-end shrink-0">
+                    <button type="button" onclick="openOfflineQueueModal()"
+                        class="px-2.5 py-1.5 bg-amber-100 hover:bg-amber-200 text-amber-900 font-bold rounded-xl text-xs transition border border-amber-300 flex items-center gap-1.5">
+                        <i class="fa-solid fa-list-check"></i> Rincian
+                    </button>
+                    <button type="button" onclick="triggerOfflineSync(false)" id="btn-banner-sync"
+                        class="px-3.5 py-1.5 bg-amber-600 hover:bg-amber-700 active:scale-95 text-white font-bold rounded-xl text-xs transition shadow-sm flex items-center gap-1.5">
+                        <i class="fa-solid fa-rotate"></i> Sinkronkan
+                    </button>
+                </div>
             </div>
 
             <!-- Desktop Unified Tab Bar (Hanya tampil di layar desktop / PC) -->
@@ -3333,6 +3340,64 @@
             </div>
         </div>
 
+        <!-- MODAL: DAFTAR & RINCIAN ANTREAN ABSENSI OFFLINE -->
+        <div id="modal-offline-attendance-detail"
+            class="fixed inset-0 bg-slate-950/70 backdrop-blur-md hidden flex items-end sm:items-center justify-center p-0 sm:p-4 z-50 transition-all">
+            <div
+                class="card-saas p-5 sm:p-6 w-full max-w-md rounded-t-3xl sm:rounded-3xl animate-sheet border border-slate-200/80 shadow-2xl max-h-[90vh] flex flex-col bg-white">
+                <!-- Header -->
+                <div class="flex items-center justify-between pb-3 border-b border-slate-100">
+                    <div class="flex items-center gap-2.5">
+                        <div class="w-9 h-9 rounded-xl bg-amber-500/15 text-amber-600 flex items-center justify-center text-base">
+                            <i class="fa-solid fa-cloud-arrow-up"></i>
+                        </div>
+                        <div>
+                            <h3 class="font-bold text-slate-800 text-sm">Antrean Absensi Offline</h3>
+                            <p class="text-[11px] text-slate-500">Tersimpan di memori HP (menunggu sinkronisasi)</p>
+                        </div>
+                    </div>
+                    <button type="button" onclick="closeOfflineQueueModal()"
+                        class="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 flex items-center justify-center text-xs transition">
+                        <i class="fa-solid fa-xmark"></i>
+                    </button>
+                </div>
+
+                <!-- Info Banner -->
+                <div class="mt-3 p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-[11px] text-amber-900 leading-relaxed flex items-start gap-2">
+                    <i class="fa-solid fa-circle-info text-amber-600 mt-0.5 shrink-0"></i>
+                    <div>
+                        Jika Anda sudah berhasil absen saat online atau jadwal shift sudah lewat, Anda dapat menghapus antrean gantung agar status kembali normal.
+                    </div>
+                </div>
+
+                <!-- Body (Scrollable list of queue items) -->
+                <div id="offline-queue-list-container" class="py-3 overflow-y-auto space-y-2.5 flex-1 max-h-[48vh]">
+                    <!-- Dynamically rendered items -->
+                </div>
+
+                <!-- Footer Action Buttons -->
+                <div class="pt-3 border-t border-slate-100 flex flex-col gap-2">
+                    <div class="flex items-center gap-2">
+                        <button type="button" onclick="triggerOfflineSync(false)" id="btn-modal-sync-all"
+                            class="flex-1 py-2.5 px-4 bg-amber-600 hover:bg-amber-700 active:scale-95 text-white rounded-xl text-xs font-bold shadow-md transition flex items-center justify-center gap-2">
+                            <i class="fa-solid fa-rotate"></i>
+                            <span>Sinkronkan Sekarang</span>
+                        </button>
+                        <button type="button" onclick="confirmClearAllOfflineQueue()" id="btn-modal-clear-all"
+                            class="py-2.5 px-3 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-xl text-xs font-bold transition flex items-center gap-1.5"
+                            title="Bersihkan semua antrean">
+                            <i class="fa-solid fa-trash-can"></i>
+                            <span>Hapus Semua</span>
+                        </button>
+                    </div>
+                    <button type="button" onclick="closeOfflineQueueModal()"
+                        class="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl text-xs font-semibold transition">
+                        Tutup
+                    </button>
+                </div>
+            </div>
+        </div>
+
         <!-- MODAL 12: FORM PENGAJUAN CUTI / IZIN -->
         <div id="modal-izin"
             class="fixed inset-0 bg-slate-950/70 backdrop-blur-md hidden flex items-end sm:items-center justify-center p-0 sm:p-4 z-50 transition-all">
@@ -4369,7 +4434,7 @@
             } catch (e) { }
 
             /* ==========================================================================
-               OFFLINE ATTENDANCE QUEUE ENGINE (INDEXEDDB + AUTO-SYNC)
+               OFFLINE ATTENDANCE QUEUE ENGINE (INDEXEDDB + AUTO-SYNC + GRANULAR MANAGEMENT)
                ========================================================================== */
             const OfflineAttendanceEngine = {
                 DB_NAME: 'balcone_offline_db',
@@ -4391,6 +4456,7 @@
                         if (!db) {
                             try {
                                 let list = JSON.parse(safeStorage.getItem('balcone_offline_queue') || '[]');
+                                list = list.filter(item => item.id !== record.id);
                                 list.push(record);
                                 safeStorage.setItem('balcone_offline_queue', JSON.stringify(list));
                                 if (callback) callback(true);
@@ -4418,6 +4484,48 @@
                         req.onerror = () => callback([]);
                     });
                 },
+                deleteRecord: function (id, callback) {
+                    this._openDB((db) => {
+                        if (!db) {
+                            try {
+                                let list = JSON.parse(safeStorage.getItem('balcone_offline_queue') || '[]');
+                                list = list.filter(item => item.id !== id);
+                                safeStorage.setItem('balcone_offline_queue', JSON.stringify(list));
+                                if (callback) callback(true);
+                            } catch (e) { if (callback) callback(false); }
+                            return;
+                        }
+                        const tx = db.transaction(this.STORE_NAME, 'readwrite');
+                        tx.objectStore(this.STORE_NAME).delete(id);
+                        tx.oncomplete = () => { if (callback) callback(true); };
+                        tx.onerror = () => { if (callback) callback(false); };
+                    });
+                },
+                deleteRecords: function (ids, callback) {
+                    if (!ids || ids.length === 0) {
+                        if (callback) callback(true);
+                        return;
+                    }
+                    this._openDB((db) => {
+                        if (!db) {
+                            try {
+                                let list = JSON.parse(safeStorage.getItem('balcone_offline_queue') || '[]');
+                                const idSet = new Set(ids);
+                                list = list.filter(item => !idSet.has(item.id));
+                                safeStorage.setItem('balcone_offline_queue', JSON.stringify(list));
+                                if (callback) callback(true);
+                            } catch (e) { if (callback) callback(false); }
+                            return;
+                        }
+                        const tx = db.transaction(this.STORE_NAME, 'readwrite');
+                        const store = tx.objectStore(this.STORE_NAME);
+                        ids.forEach(id => {
+                            try { store.delete(id); } catch(err) {}
+                        });
+                        tx.oncomplete = () => { if (callback) callback(true); };
+                        tx.onerror = () => { if (callback) callback(false); };
+                    });
+                },
                 clearAll: function (callback) {
                     this._openDB((db) => {
                         if (!db) {
@@ -4437,11 +4545,22 @@
                 OfflineAttendanceEngine.getAllRecords(function (records) {
                     const banner = document.getElementById('banner-offline-attendance');
                     const text = document.getElementById('banner-offline-text');
+                    const subtext = document.getElementById('banner-offline-subtext');
                     if (!banner) return;
                     if (records && records.length > 0) {
                         banner.classList.remove('hidden');
                         if (text) {
-                            text.innerText = 'Tersimpan ' + records.length + ' absensi offline (menunggu sinyal)';
+                            if (records.length === 1) {
+                                const r = records[0];
+                                const typeLabel = (r.actionType === 'MASUK') ? 'Masuk' : 'Pulang';
+                                const timeStr = r.timestamp ? new Date(r.timestamp).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) : '';
+                                text.innerText = 'Tersimpan 1 absensi offline: ' + typeLabel + (timeStr ? ' (' + timeStr + ')' : '');
+                            } else {
+                                text.innerText = 'Tersimpan ' + records.length + ' absensi offline (menunggu sinyal)';
+                            }
+                        }
+                        if (subtext) {
+                            subtext.innerText = 'Ketuk untuk rincian shift, sinkronkan atau hapus antrean gantung';
                         }
                     } else {
                         banner.classList.add('hidden');
@@ -4463,7 +4582,13 @@
                 }
             }
 
+            let isSyncingOfflineQueue = false;
+
             function triggerOfflineSync(isSilent) {
+                if (isSyncingOfflineQueue) {
+                    if (!isSilent) showToast('Sinkronisasi sedang berjalan...', 'info');
+                    return;
+                }
                 if (!navigator.onLine) {
                     if (!isSilent) showToast('Koneksi internet belum tersedia untuk sinkronisasi.', 'info');
                     return;
@@ -4471,22 +4596,215 @@
                 OfflineAttendanceEngine.getAllRecords(function (records) {
                     if (!records || records.length === 0) {
                         updateOfflineAttendanceUI();
+                        if (!isSilent) showToast('Tidak ada antrean absensi offline.', 'info');
                         return;
                     }
+
+                    isSyncingOfflineQueue = true;
+                    const btnBanner = document.getElementById('btn-banner-sync');
+                    const btnModal = document.getElementById('btn-modal-sync-all');
+                    if (btnBanner) {
+                        btnBanner.disabled = true;
+                        btnBanner.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Sinkron...';
+                    }
+                    if (btnModal) {
+                        btnModal.disabled = true;
+                        btnModal.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Menyinkronkan...';
+                    }
+
                     if (!isSilent) showToast('Menyinkronkan ' + records.length + ' absensi offline ke server...', 'info');
+
                     runBackend('syncOfflineAttendance', [records], function (res) {
+                        isSyncingOfflineQueue = false;
+                        if (btnBanner) {
+                            btnBanner.disabled = false;
+                            btnBanner.innerHTML = '<i class="fa-solid fa-rotate"></i> Sinkronkan';
+                        }
+                        if (btnModal) {
+                            btnModal.disabled = false;
+                            btnModal.innerHTML = '<i class="fa-solid fa-rotate"></i> <span>Sinkronkan Sekarang</span>';
+                        }
+
                         if (res && res.success) {
-                            OfflineAttendanceEngine.clearAll(function () {
+                            // Dapatkan list ID item yang statusnya 'synced' atau 'already_recorded'
+                            const resolvedIds = [];
+                            if (Array.isArray(res.itemResults)) {
+                                res.itemResults.forEach(item => {
+                                    if (item.status === 'synced' || item.status === 'already_recorded') {
+                                        resolvedIds.push(item.id);
+                                    }
+                                });
+                            }
+
+                            if (resolvedIds.length >= records.length || (res.resolvedCount && res.resolvedCount >= records.length)) {
+                                OfflineAttendanceEngine.clearAll(function () {
+                                    updateOfflineAttendanceUI();
+                                    renderOfflineQueueModal();
+                                    closeOfflineQueueModal();
+                                    showToast(res.message || 'Semua absensi offline berhasil diselesaikan!', 'success');
+                                    loadKaryawanDashboard(true);
+                                });
+                            } else if (resolvedIds.length > 0) {
+                                OfflineAttendanceEngine.deleteRecords(resolvedIds, function () {
+                                    updateOfflineAttendanceUI();
+                                    renderOfflineQueueModal();
+                                    showToast(res.message || (resolvedIds.length + ' absensi offline diselesaikan.'), 'info');
+                                    loadKaryawanDashboard(true);
+                                });
+                            } else {
                                 updateOfflineAttendanceUI();
-                                showToast(res.message || 'Semua absensi offline berhasil disinkronkan!', 'success');
-                                loadKaryawanDashboard(true);
-                            });
+                                renderOfflineQueueModal();
+                                if (!isSilent) showToast(res.message || 'Sinkronisasi tertahan. Periksa detail antrean.', 'error');
+                            }
                         } else {
                             if (!isSilent) showToast('Gagal sinkronisasi: ' + (res ? res.message : 'Gangguan server'), 'error');
                         }
                     }, function (err) {
+                        isSyncingOfflineQueue = false;
+                        if (btnBanner) {
+                            btnBanner.disabled = false;
+                            btnBanner.innerHTML = '<i class="fa-solid fa-rotate"></i> Sinkronkan';
+                        }
+                        if (btnModal) {
+                            btnModal.disabled = false;
+                            btnModal.innerHTML = '<i class="fa-solid fa-rotate"></i> <span>Sinkronkan Sekarang</span>';
+                        }
                         if (!isSilent) showToast('Koneksi belum stabil. Akan otomatis dicoba lagi.', 'error');
                     });
+                });
+            }
+
+            function openOfflineQueueModal() {
+                const modal = document.getElementById('modal-offline-attendance-detail');
+                if (!modal) return;
+                modal.classList.remove('hidden');
+                renderOfflineQueueModal();
+            }
+
+            function closeOfflineQueueModal() {
+                const modal = document.getElementById('modal-offline-attendance-detail');
+                if (modal) modal.classList.add('hidden');
+            }
+
+            function renderOfflineQueueModal() {
+                const container = document.getElementById('offline-queue-list-container');
+                if (!container) return;
+                container.innerHTML = '<div class="text-center py-6 text-slate-400 text-xs"><i class="fa-solid fa-spinner fa-spin mr-1.5"></i> Memuat antrean...</div>';
+
+                OfflineAttendanceEngine.getAllRecords(function (records) {
+                    if (!records || records.length === 0) {
+                        container.innerHTML =
+                            '<div class="text-center py-8 px-4 bg-slate-50 border border-slate-100 rounded-2xl text-slate-500">' +
+                            '<div class="w-12 h-12 mx-auto mb-2 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center text-xl">' +
+                            '<i class="fa-solid fa-circle-check"></i>' +
+                            '</div>' +
+                            '<p class="text-xs font-bold text-slate-700">Tidak Ada Antrean Offline</p>' +
+                            '<p class="text-[11px] text-slate-400 mt-0.5">Semua rekaman presensi Anda sudah sinkron bersih dengan server.</p>' +
+                            '</div>';
+                        const btnSync = document.getElementById('btn-modal-sync-all');
+                        const btnClear = document.getElementById('btn-modal-clear-all');
+                        if (btnSync) btnSync.classList.add('hidden');
+                        if (btnClear) btnClear.classList.add('hidden');
+                        return;
+                    }
+
+                    const btnSync = document.getElementById('btn-modal-sync-all');
+                    const btnClear = document.getElementById('btn-modal-clear-all');
+                    if (btnSync) btnSync.classList.remove('hidden');
+                    if (btnClear) btnClear.classList.remove('hidden');
+
+                    let html = '';
+                    records.forEach(function (rec, idx) {
+                        const isMasuk = (rec.actionType === 'MASUK');
+                        const badgeColor = isMasuk
+                            ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                            : 'bg-indigo-100 text-indigo-800 border-indigo-300';
+                        const badgeIcon = isMasuk ? 'fa-arrow-right-to-bracket' : 'fa-arrow-right-from-bracket';
+                        const actionLabel = isMasuk ? 'PRESENSI MASUK' : 'PRESENSI PULANG';
+
+                        let dateLabel = '-';
+                        let timeLabel = '-';
+                        if (rec.timestamp) {
+                            try {
+                                const d = new Date(rec.timestamp);
+                                dateLabel = d.toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' });
+                                timeLabel = d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                            } catch (e) {
+                                dateLabel = rec.createdAt || '-';
+                            }
+                        } else if (rec.createdAt) {
+                            dateLabel = rec.createdAt;
+                        }
+
+                        const shiftLabel = rec.shiftInfo ? ('Shift: ' + rec.shiftInfo) : 'Shift Kerja Operasional';
+
+                        html +=
+                            '<div class="p-3.5 bg-slate-50 border border-slate-200/80 rounded-2xl space-y-2.5 transition hover:border-amber-300">' +
+                            '  <div class="flex items-center justify-between gap-2">' +
+                            '    <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold border ' + badgeColor + '">' +
+                            '      <i class="fa-solid ' + badgeIcon + '"></i> ' + actionLabel +
+                            '    </span>' +
+                            '    <span class="text-[10px] text-slate-400 font-mono">#' + (idx + 1) + '</span>' +
+                            '  </div>' +
+                            '  <div class="grid grid-cols-2 gap-2 text-xs bg-white p-2.5 rounded-xl border border-slate-100">' +
+                            '    <div>' +
+                            '      <span class="text-[10px] text-slate-400 block font-medium">TANGGAL</span>' +
+                            '      <span class="font-bold text-slate-700 text-[11px]">' + dateLabel + '</span>' +
+                            '    </div>' +
+                            '    <div>' +
+                            '      <span class="text-[10px] text-slate-400 block font-medium">JAM REKAM (HP)</span>' +
+                            '      <span class="font-bold text-slate-800 font-mono text-[11px]">' + timeLabel + '</span>' +
+                            '    </div>' +
+                            '  </div>' +
+                            '  <div class="flex items-center justify-between text-[11px] pt-0.5">' +
+                            '    <div class="flex items-center gap-1.5 text-slate-500">' +
+                            '      <i class="fa-regular fa-clock text-amber-500"></i>' +
+                            '      <span>' + shiftLabel + '</span>' +
+                            '    </div>' +
+                            '    <button type="button" onclick="deleteSingleOfflineItem(\'' + rec.id + '\')" ' +
+                            '      class="px-2.5 py-1 text-[11px] text-rose-600 hover:text-rose-800 hover:bg-rose-50 rounded-lg transition border border-rose-200 font-semibold flex items-center gap-1.5 active:scale-95">' +
+                            '      <i class="fa-solid fa-trash-can"></i> Hapus' +
+                            '    </button>' +
+                            '  </div>' +
+                            '</div>';
+                    });
+
+                    container.innerHTML = html;
+                });
+            }
+
+            function deleteSingleOfflineItem(id) {
+                const isConfirmed = confirm('Hapus antrean absensi offline ini?\n\nGunakan opsi ini jika Anda sudah berhasil absen saat online atau ingin membersihkan rekaman gantung ini.');
+                if (!isConfirmed) return;
+
+                OfflineAttendanceEngine.deleteRecord(id, function (ok) {
+                    if (ok) {
+                        showToast('Antrean absensi berhasil dihapus.', 'info');
+                        renderOfflineQueueModal();
+                        updateOfflineAttendanceUI();
+                        syncAttendanceButtonsWithOfflineQueue();
+                        loadKaryawanDashboard(true);
+                    } else {
+                        showToast('Gagal menghapus antrean.', 'error');
+                    }
+                });
+            }
+
+            function confirmClearAllOfflineQueue() {
+                const isConfirmed = confirm('Peringatan: Seluruh data antrean offline di HP ini akan dibersihkan.\n\nPastikan data presensi Anda sudah tercatat di sistem atau lembar kerja HRD. Lanjutkan?');
+                if (!isConfirmed) return;
+
+                OfflineAttendanceEngine.clearAll(function (ok) {
+                    if (ok) {
+                        showToast('Semua antrean absensi offline berhasil dibersihkan.', 'success');
+                        renderOfflineQueueModal();
+                        closeOfflineQueueModal();
+                        updateOfflineAttendanceUI();
+                        syncAttendanceButtonsWithOfflineQueue();
+                        loadKaryawanDashboard(true);
+                    } else {
+                        showToast('Gagal membersihkan antrean.', 'error');
+                    }
                 });
             }
 
@@ -5683,6 +6001,31 @@
                     const hasMasuk = userTodayRecords.find(r => r.actionType === 'MASUK');
                     const hasPulang = userTodayRecords.find(r => r.actionType === 'PULANG');
 
+                    // REKONSILIASI OTOMATIS:
+                    // Jika data saat ini di server (currentLastTodayRecord) SUDAH mencatat absensi sah:
+                    const serverHasMasuk = (currentLastTodayRecord && currentLastTodayRecord.jam_masuk && currentLastTodayRecord.jam_masuk !== '' && currentLastTodayRecord.jam_masuk !== '--:--' && !(currentLastTodayRecord.status || '').includes('Offline'));
+                    const serverHasPulang = (currentLastTodayRecord && currentLastTodayRecord.jam_pulang && currentLastTodayRecord.jam_pulang !== '' && currentLastTodayRecord.jam_pulang !== '--:--' && !(currentLastTodayRecord.status || '').includes('Offline'));
+
+                    let purgedAny = false;
+                    if (hasMasuk && serverHasMasuk) {
+                        OfflineAttendanceEngine.deleteRecord(hasMasuk.id, function () {
+                            updateOfflineAttendanceUI();
+                        });
+                        purgedAny = true;
+                    }
+
+                    if (hasPulang && serverHasPulang) {
+                        OfflineAttendanceEngine.deleteRecord(hasPulang.id, function () {
+                            updateOfflineAttendanceUI();
+                        });
+                        purgedAny = true;
+                    }
+
+                    // Jika duplikat dibersihkan dan server sudah memegang data valid, pertahankan tampilan server!
+                    if (serverHasMasuk && (!hasPulang || serverHasPulang)) {
+                        return;
+                    }
+
                     if (hasMasuk && hasPulang) {
                         const masukTime = hasMasuk.timestamp ? new Date(hasMasuk.timestamp).toLocaleTimeString('id-ID', { hour12: false }) : '--:--';
                         const pulangTime = hasPulang.timestamp ? new Date(hasPulang.timestamp).toLocaleTimeString('id-ID', { hour12: false }) : '--:--';
@@ -5699,33 +6042,37 @@
                             statusElem.className = 'text-xs bg-amber-50 text-amber-800 border border-amber-300 px-3 py-1 rounded-full font-bold';
                         }
                     } else if (hasMasuk && !hasPulang) {
-                        const masukTime = hasMasuk.timestamp ? new Date(hasMasuk.timestamp).toLocaleTimeString('id-ID', { hour12: false }) : '--:--';
-                        currentLastTodayRecord = {
-                            jam_masuk: masukTime,
-                            jam_pulang: '',
-                            status: 'Hadir (Offline)'
-                        };
-                        renderAttendanceActionButtons(currentLastTodayRecord, currentTodayShiftInfo || 'Standard', false);
+                        if (!serverHasMasuk) {
+                            const masukTime = hasMasuk.timestamp ? new Date(hasMasuk.timestamp).toLocaleTimeString('id-ID', { hour12: false }) : '--:--';
+                            currentLastTodayRecord = {
+                                jam_masuk: masukTime,
+                                jam_pulang: '',
+                                status: 'Hadir (Offline)'
+                            };
+                            renderAttendanceActionButtons(currentLastTodayRecord, currentTodayShiftInfo || 'Standard', false);
 
-                        const statusElem = document.getElementById('emp-status-today');
-                        if (statusElem) {
-                            statusElem.innerText = 'Status: Hadir Offline (' + masukTime + ') - Menunggu Sinyal';
-                            statusElem.className = 'text-xs bg-amber-50 text-amber-800 border border-amber-300 px-3 py-1 rounded-full font-bold';
+                            const statusElem = document.getElementById('emp-status-today');
+                            if (statusElem) {
+                                statusElem.innerText = 'Status: Hadir Offline (' + masukTime + ') - Menunggu Sinyal';
+                                statusElem.className = 'text-xs bg-amber-50 text-amber-800 border border-amber-300 px-3 py-1 rounded-full font-bold';
+                            }
                         }
                     } else if (!hasMasuk && hasPulang) {
-                        const masukTime = (currentLastTodayRecord && currentLastTodayRecord.jam_masuk) ? currentLastTodayRecord.jam_masuk : '--:--';
-                        const pulangTime = hasPulang.timestamp ? new Date(hasPulang.timestamp).toLocaleTimeString('id-ID', { hour12: false }) : '--:--';
-                        currentLastTodayRecord = {
-                            jam_masuk: masukTime,
-                            jam_pulang: pulangTime,
-                            status: 'Presensi Selesai (Offline)'
-                        };
-                        renderAttendanceActionButtons(currentLastTodayRecord, currentTodayShiftInfo || 'Standard', false);
+                        if (!serverHasPulang) {
+                            const masukTime = (currentLastTodayRecord && currentLastTodayRecord.jam_masuk) ? currentLastTodayRecord.jam_masuk : '--:--';
+                            const pulangTime = hasPulang.timestamp ? new Date(hasPulang.timestamp).toLocaleTimeString('id-ID', { hour12: false }) : '--:--';
+                            currentLastTodayRecord = {
+                                jam_masuk: masukTime,
+                                jam_pulang: pulangTime,
+                                status: 'Presensi Selesai (Offline)'
+                            };
+                            renderAttendanceActionButtons(currentLastTodayRecord, currentTodayShiftInfo || 'Standard', false);
 
-                        const statusElem = document.getElementById('emp-status-today');
-                        if (statusElem) {
-                            statusElem.innerText = 'Status: Presensi Selesai Offline (' + pulangTime + ') - Menunggu Sinyal';
-                            statusElem.className = 'text-xs bg-amber-50 text-amber-800 border border-amber-300 px-3 py-1 rounded-full font-bold';
+                            const statusElem = document.getElementById('emp-status-today');
+                            if (statusElem) {
+                                statusElem.innerText = 'Status: Presensi Selesai Offline (' + pulangTime + ') - Menunggu Sinyal';
+                                statusElem.className = 'text-xs bg-amber-50 text-amber-800 border border-amber-300 px-3 py-1 rounded-full font-bold';
+                            }
                         }
                     }
                 });
@@ -8408,6 +8755,7 @@
                         lng: lng,
                         qrSecretCode: secret,
                         actionType: currentAttendanceAction,
+                        shiftInfo: currentTodayShiftInfo || 'Standard',
                         timestamp: timestamp,
                         createdAt: new Date(timestamp).toLocaleString('id-ID')
                     };
